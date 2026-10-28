@@ -436,6 +436,4 @@ rm $XDG_RUNTIME_DIR/webkit-bridge.sock
 
 ## Лицензия
 
-
-
 ## Участие в разработке

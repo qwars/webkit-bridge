@@ -436,6 +436,4 @@ Tabs are owned by the client process (identified by PID). If the process dies un
 
 ## License
 
-[Add your license here]
-
 ## Contributing
