@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test_eval.sh — JavaScript evaluation tests
-# Tests: tab.eval with various expressions
+# Tests: eval with various expressions
 
 set -euo pipefail
 
@@ -14,7 +14,7 @@ main() {
 
     log INFO "=== Setup: Create a tab ==="
     local create_output
-    create_output="$(wkctl tab.create --url https://example.com)"
+    create_output="$(wkctl create --url https://example.com)"
     local tab_id
     tab_id="$(echo "$create_output" | grep -oE '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}')"
     assert_not_empty "$tab_id" "tab created for eval tests"
@@ -24,28 +24,28 @@ main() {
 
     log INFO "=== Test: Eval simple expression ==="
     local eval_output
-    eval_output="$(wkctl tab.eval --id "$tab_id" --script '1 + 1')"
+    eval_output="$(wkctl eval --id "$tab_id" --script '1 + 1')"
     log INFO "Eval output: $eval_output"
     assert_contains "$eval_output" "2" "eval returns correct result for 1+1"
 
     log INFO "=== Test: Eval string expression ==="
-    eval_output="$(wkctl tab.eval --id "$tab_id" --script '"hello" + " " + "world"')"
+    eval_output="$(wkctl eval --id "$tab_id" --script '"hello" + " " + "world"')"
     log INFO "Eval output: $eval_output"
     assert_contains "$eval_output" "hello world" "eval returns concatenated string"
 
     log INFO "=== Test: Eval document.title ==="
-    eval_output="$(wkctl tab.eval --id "$tab_id" --script 'document.title')"
+    eval_output="$(wkctl eval --id "$tab_id" --script 'document.title')"
     log INFO "Eval output: $eval_output"
     assert_not_empty "$eval_output" "eval returns document title"
 
     log INFO "=== Test: Eval DOM manipulation ==="
-    eval_output="$(wkctl tab.eval --id "$tab_id" --script 'document.body.innerHTML = "<h1>Test</h1>"; document.body.innerHTML')"
+    eval_output="$(wkctl eval --id "$tab_id" --script 'document.body.innerHTML = "<h1>Test</h1>"; document.body.innerHTML')"
     log INFO "Eval output: $eval_output"
     assert_contains "$eval_output" "Test" "eval can manipulate DOM"
 
     log INFO "=== Test: Eval with syntax error ==="
     local eval_exit=0
-    eval_output="$(wkctl tab.eval --id "$tab_id" --script 'this is not valid javascript {{{')" || eval_exit=$?
+    eval_output="$(wkctl eval --id "$tab_id" --script 'this is not valid javascript {{{')" || eval_exit=$?
     log INFO "Eval error output: $eval_output (exit: $eval_exit)"
 
     TESTS_RUN=$((TESTS_RUN + 1))
@@ -58,7 +58,7 @@ main() {
     fi
 
     log INFO "=== Cleanup ==="
-    wkctl tab.close --id "$tab_id" >/dev/null || true
+    wkctl close --id "$tab_id" >/dev/null || true
 
     stop_daemon
     print_summary

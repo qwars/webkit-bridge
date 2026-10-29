@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex, broadcast};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -91,9 +91,52 @@ impl IpcServer {
 		session_client_id: Uuid,
 		owner_pid: Option<i32>,
 	) -> Result<()> {
-		let (reader, mut writer) = stream.into_split();
+		let (reader, writer) = stream.into_split();
 		let mut reader = BufReader::new(reader);
+		let writer = Arc::new(Mutex::new(writer));
 		let mut line = String::new();
+
+		// Подписка на broadcast-канал для отправки notifications
+		let mut event_rx = manager.subscribe();
+		let writer_for_events = Arc::clone(&writer);
+
+		// Фоновая задача: при любом DaemonEvent отправляем notification tabs_changed
+		let event_task = tokio::spawn(async move {
+			loop {
+				match event_rx.recv().await {
+					Ok(_) => {
+						let notification = serde_json::json!({
+							"jsonrpc": "2.0",
+							"method": "tabs_changed",
+							"params": {}
+						});
+						let notification_json = match serde_json::to_string(&notification) {
+							Ok(s) => s,
+							Err(_) => continue,
+						};
+						let mut w = writer_for_events.lock().await;
+						if w.write_all(notification_json.as_bytes()).await.is_err() {
+							break;
+						}
+						if w.write_all(b"\n").await.is_err() {
+							break;
+						}
+						if w.flush().await.is_err() {
+							break;
+						}
+					}
+					Err(broadcast::error::RecvError::Lagged(n)) => {
+						warn!("Event receiver lagged, skipped {} events", n);
+						continue;
+					}
+					Err(broadcast::error::RecvError::Closed) => {
+						break;
+					}
+				}
+			}
+		});
+
+		// Основной цикл: чтение запросов и отправка ответов
 		loop {
 			line.clear();
 			let bytes_read = reader.read_line(&mut line).await?;
@@ -118,16 +161,24 @@ impl IpcServer {
 						id: None,
 					};
 					let response_json = serde_json::to_string(&response)?;
-					writer.write_all(response_json.as_bytes()).await?;
-					writer.write_all(b"\n").await?;
+					let mut w = writer.lock().await;
+					w.write_all(response_json.as_bytes()).await?;
+					w.write_all(b"\n").await?;
+					w.flush().await?;
 					continue;
 				}
 			};
 			let response = Self::process_request(request, &manager, session_client_id, owner_pid).await;
 			let response_json = serde_json::to_string(&response)?;
-			writer.write_all(response_json.as_bytes()).await?;
-			writer.write_all(b"\n").await?;
+			let mut w = writer.lock().await;
+			w.write_all(response_json.as_bytes()).await?;
+			w.write_all(b"\n").await?;
+			w.flush().await?;
 		}
+
+		// При отключении клиента — завершаем задачу отправки событий
+		event_task.abort();
+
 		Ok(())
 	}
 
@@ -163,26 +214,20 @@ impl IpcServer {
 		let event_tx = manager.event_tx();
 
 		match request.method.as_str() {
-			"tab.create" => {
+			"create" => {
 				let url = request
 					.params
 					.as_ref()
 					.and_then(|p| p.get("url").and_then(|v| v.as_str()))
-					.unwrap_or("about:blank")
+					.unwrap_or("")
 					.to_string();
 				let visible = request
 					.params
 					.as_ref()
 					.and_then(|p| p.get("visible").and_then(|v| v.as_bool()))
 					.unwrap_or(false);
-				let profile = request
-					.params
-					.as_ref()
-					.and_then(|p| p.get("profile").and_then(|v| v.as_str()))
-					.unwrap_or("default")
-					.to_string();
 				match manager
-					.create_tab(&url, visible, &profile, effective_client_id, owner_pid)
+					.create_tab(&url, visible, "default", effective_client_id, owner_pid)
 					.await
 				{
 					Ok(id) => {
@@ -205,7 +250,7 @@ impl IpcServer {
 					}
 				}
 			}
-			"tab.close" => {
+			"close" => {
 				let id_str = request
 					.params
 					.as_ref()
@@ -234,7 +279,7 @@ impl IpcServer {
 					}
 				}
 			}
-			"tab.navigate" => {
+			"navigate" => {
 				let id_str = request
 					.params
 					.as_ref()
@@ -273,7 +318,7 @@ impl IpcServer {
 					}
 				}
 			}
-			"tab.reload" => {
+			"reload" => {
 				let id_str = request
 					.params
 					.as_ref()
@@ -303,7 +348,7 @@ impl IpcServer {
 					}
 				}
 			}
-			"tab.eval" => {
+			"eval" => {
 				let id_str = request
 					.params
 					.as_ref()
@@ -338,7 +383,7 @@ impl IpcServer {
 					}
 				}
 			}
-			"tab.list" => {
+			"list" => {
 				let tabs = manager.list_tabs().await;
 				let tabs_json: Vec<_> = tabs
 					.into_iter()
@@ -359,7 +404,7 @@ impl IpcServer {
 					id: request.id,
 				}
 			}
-			"daemon.shutdown" => {
+			"shutdown" => {
 				info!("Shutdown requested by client {}", short_uuid(&effective_client_id));
 				let _ = event_tx.send(DaemonEvent::Shutdown);
 				JsonRpcResponse {
@@ -391,25 +436,25 @@ mod tests {
 
 	#[test]
 	fn test_jsonrpc_request_parse_valid() {
-		let json = r#"{"jsonrpc":"2.0","method":"tab.create","params":{"url":"https://example.com"},"id":1}"#;
+		let json = r#"{"jsonrpc":"2.0","method":"create","params":{"url":"https://example.com"},"id":1}"#;
 		let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
 		assert_eq!(req.jsonrpc, "2.0");
-		assert_eq!(req.method, "tab.create");
+		assert_eq!(req.method, "create");
 		assert!(req.params.is_some());
 		assert!(req.id.is_some());
 	}
 
 	#[test]
 	fn test_jsonrpc_request_parse_without_params() {
-		let json = r#"{"jsonrpc":"2.0","method":"tab.list","id":2}"#;
+		let json = r#"{"jsonrpc":"2.0","method":"list","id":2}"#;
 		let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
-		assert_eq!(req.method, "tab.list");
+		assert_eq!(req.method, "list");
 		assert!(req.params.is_none());
 	}
 
 	#[test]
 	fn test_jsonrpc_request_parse_invalid_json() {
-		let json = r#"{"jsonrpc":"2.0","method":"tab.create""#;
+		let json = r#"{"jsonrpc":"2.0","method":"create""#;
 		let result: Result<JsonRpcRequest, _> = serde_json::from_str(json);
 		assert!(result.is_err());
 	}

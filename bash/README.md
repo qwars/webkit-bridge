@@ -12,23 +12,23 @@ These tests verify the complete system behavior by:
 ## Prerequisites
 
 - `bash` 4.0+
-- `jq` (for JSON parsing)
-- `socat` or `python3` (for raw socket communication in shutdown test)
 - Built binaries: `target/debug/wkctl` and `target/debug/ewd-daemon`
 
-Install dependencies on Ubuntu/Debian:
+Build them with:
 ```bash
-sudo apt-get install jq socat
+cargo build
 ```
 
 ## Usage
 
 ### Run all tests
+
 ```bash
 ./bash/integration.sh
 ```
 
 ### Run specific test suite
+
 ```bash
 ./bash/integration.sh basic
 ./bash/integration.sh eval
@@ -77,7 +77,7 @@ sudo apt-get install jq socat
 
 ### `test_shutdown.sh` — Graceful shutdown
 - Verify daemon is alive
-- Send `daemon.shutdown` via raw JSON-RPC
+- Send `shutdown` via JSON-RPC
 - Verify daemon stops within 5 seconds
 - Verify socket file is removed
 
@@ -87,56 +87,58 @@ sudo apt-get install jq socat
 
 Each test suite runs in an isolated environment:
 - Creates a temporary directory: `/tmp/ewd-test-$$/`
-- Sets `XDG_RUNTIME_DIR` to this directory
+- Sets `EWD_SOCKET_PATH` to `<temp-dir>/webkit-bridge.sock`
+- Preserves original `XDG_RUNTIME_DIR` for GTK initialization
 - Both daemon and client automatically use the isolated socket path
 - No interference with production daemon or other test runs
 
 ### Test Framework
 
-- `helpers.sh` provides:
-  - Assertion functions: `assert_eq`, `assert_contains`, `assert_not_empty`, `assert_success`, `assert_failure`
-  - Daemon management: `start_daemon`, `stop_daemon`, `daemon_is_alive`
-  - Environment setup: `setup_test_env`, `cleanup`
-  - Logging with colors and timestamps
+`helpers.sh` provides:
+- Assertion functions: `assert_eq`, `assert_contains`, `assert_not_empty`, `assert_success`, `assert_failure`
+- Daemon management: `start_daemon`, `stop_daemon`, `daemon_is_alive`
+- Environment setup: `setup_test_env`, `cleanup`
+- Logging with colors and timestamps
 
 ### Cleanup
 
-- All tests register a `trap cleanup EXIT` to ensure:
-  - Daemon is stopped
-  - Temporary directory is removed
-  - No leftover socket files
+All tests register a `trap cleanup EXIT` to ensure:
+- Daemon is stopped
+- Temporary directory is removed
+- No leftover socket files
 
 ## Debugging
 
 ### View logs
+
 ```bash
 cat bash/test.log
 ```
 
 ### Run with verbose output
+
 ```bash
 bash -x ./bash/integration.sh basic
 ```
 
 ### Manual testing
+
 ```bash
 # Start daemon in one terminal
-XDG_RUNTIME_DIR=/tmp/ewd-manual ./target/debug/ewd-daemon
+./target/debug/ewd-daemon
 
 # In another terminal
-export XDG_RUNTIME_DIR=/tmp/ewd-manual
-./target/debug/wkctl tab.create --url https://example.com
-./target/debug/wkctl tab.list
-./target/debug/wkctl tab.eval --id <tab-id> --script 'document.title'
-./target/debug/wkctl tab.close --id <tab-id>
+./target/debug/wkctl create --url https://example.com
+./target/debug/wkctl list
+./target/debug/wkctl eval --id <tab-id> --script 'document.title'
+./target/debug/wkctl close --id <tab-id>
 ```
 
 ## Known Limitations
 
-1. **Orphan test takes ~65 seconds** — This is expected due to the 60-second cleanup interval
-2. **Headless mode** — Tests run with `WEBKIT_DISABLE_COMPOSITING_MODE=1` for AMDGPU/Wayland compatibility
-3. **No GUI verification** — Tests verify behavior via IPC, not visual inspection
-4. **Single daemon instance** — Tests assume no other daemon is running on the system
+- **Orphan test takes ~65 seconds** — This is expected due to the 60-second cleanup interval in the daemon
+- **No GUI verification** — Tests verify behavior via IPC, not visual inspection
+- **Single daemon instance** — Tests assume no other daemon is running on the system
 
 ## Adding New Tests
 
@@ -149,9 +151,10 @@ export XDG_RUNTIME_DIR=/tmp/ewd-manual
 ## CI Integration
 
 These tests can be run in CI:
+
 ```yaml
 - run: cargo build
 - run: ./bash/integration.sh
 ```
 
-Note: CI environments may need additional packages (`jq`, `socat`) and may require headless display setup.
+Note: CI environments may require headless display setup (e.g., `xvfb-run` or Wayland-compatible environment).

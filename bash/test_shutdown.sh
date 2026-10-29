@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test_shutdown.sh — Graceful shutdown tests
-# Tests: daemon.shutdown via IPC stops the daemon
+# Tests: shutdown via IPC stops the daemon
 
 set -euo pipefail
 
@@ -26,7 +26,7 @@ main() {
     log INFO "=== Test: Send daemon.shutdown command ==="
     # Use raw JSON-RPC via socat or netcat to send shutdown
     # wkctl doesn't have a shutdown command, so we send raw JSON
-    local shutdown_request='{"jsonrpc":"2.0","method":"daemon.shutdown","params":{},"id":1}'
+    local shutdown_request='{"jsonrpc":"2.0","method":"shutdown","params":{},"id":1}'
 
     # Use socat if available, otherwise use bash /dev/tcp
     if command -v socat &>/dev/null; then

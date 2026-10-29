@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "ewd-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -250,7 +250,7 @@ dependencies = [
 
 [[package]]
 name = "ewd-daemon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ewd-core",
@@ -1504,7 +1504,7 @@ dependencies = [
 
 [[package]]
 name = "wkctl"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",

@@ -18,7 +18,7 @@ main() {
     log INFO "1. Creating a tab from a background client process"
     (
         local output
-        if ! output=$(wkctl tab.create --url https://orphan-test.example.com 2>&1); then
+        if ! output=$(wkctl create --url https://orphan-test.example.com 2>&1); then
             echo "ERROR creating orphan tab: $output" >&2
             exit 1
         fi
@@ -44,7 +44,7 @@ main() {
 
     log INFO "2. Verifying tab exists before client death"
     local list_output
-    list_output="$(wkctl tab.list 2>/dev/null)"
+    list_output="$(wkctl list 2>/dev/null)"
     assert_contains "$list_output" "$tab_id" "orphan tab exists before client death"
 
     log INFO "3. Killing the client process (PID: $client_pid)"
@@ -59,7 +59,7 @@ main() {
     done
 
     log INFO "5. Verifying tab is gone after cleanup"
-    list_output="$(wkctl tab.list 2>/dev/null)"
+    list_output="$(wkctl list 2>/dev/null)"
     log INFO "   List output after cleanup: $list_output"
     assert_contains "$list_output" "No tabs" "orphan tab cleaned up after client death"
 

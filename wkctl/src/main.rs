@@ -16,33 +16,33 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-	#[command(name = "tab.create")]
+	#[command(name = "create")]
 	Create {
 		#[arg(long, help = "URL to load in the tab")]
 		url: String,
 		#[arg(long, help = "Make the tab visible in a GTK window")]
 		visible: bool,
 	},
-	#[command(name = "tab.close")]
+	#[command(name = "close")]
 	Close {
 		#[arg(long, help = "Tab ID to close")]
 		id: String,
 	},
-	#[command(name = "tab.navigate")]
+	#[command(name = "navigate")]
 	Navigate {
 		#[arg(long, help = "Tab ID to navigate")]
 		id: String,
 		#[arg(long, help = "URL to navigate to")]
 		url: String,
 	},
-	#[command(name = "tab.reload")]
+	#[command(name = "reload")]
 	Reload {
 		#[arg(long, help = "Tab ID to reload")]
 		id: String,
 	},
-	#[command(name = "tab.list")]
+	#[command(name = "list")]
 	List,
-	#[command(name = "tab.eval")]
+	#[command(name = "eval")]
 	Eval {
 		#[arg(long, help = "Tab ID to evaluate script in")]
 		id: String,
@@ -75,11 +75,35 @@ struct JsonRpcError {
 	message: String,
 }
 
+/// Чистая функция разрешения пути сокета.
+/// Не читает окружение и не вызывает `exit` — полностью тестируема.
+///
+/// Приоритет:
+/// 1. `ewd_socket` (переменная `EWD_SOCKET_PATH`)
+/// 2. `xdg_runtime` (переменная `XDG_RUNTIME_DIR`) + `/webkit-bridge.sock`
+/// 3. `None`, если оба отсутствуют
+fn resolve_socket_path(ewd_socket: Option<&str>, xdg_runtime: Option<&str>) -> Option<String> {
+	if let Some(path) = ewd_socket
+		&& !path.is_empty()
+	{
+		return Some(path.to_string());
+	}
+	if let Some(dir) = xdg_runtime
+		&& !dir.is_empty()
+	{
+		return Some(format!("{dir}/webkit-bridge.sock"));
+	}
+	None
+}
+
+/// Обёртка над `resolve_socket_path`, читающая переменные окружения.
+/// При отсутствии обоих путей печатает ошибку и завершает процесс с кодом 1.
 fn get_socket_path() -> String {
-	env::var("EWD_SOCKET_PATH").unwrap_or_else(|_| {
-		env::var("XDG_RUNTIME_DIR")
-			.map(|dir| format!("{}/webkit-bridge.sock", dir))
-			.unwrap_or_else(|_| "/tmp/webkit-bridge.sock".to_string())
+	let ewd = env::var("EWD_SOCKET_PATH").ok();
+	let xdg = env::var("XDG_RUNTIME_DIR").ok();
+	resolve_socket_path(ewd.as_deref(), xdg.as_deref()).unwrap_or_else(|| {
+		eprintln!("Error: Neither EWD_SOCKET_PATH nor XDG_RUNTIME_DIR is set. Cannot determine socket path.");
+		std::process::exit(1);
 	})
 }
 
@@ -110,9 +134,26 @@ fn send_request(method: &str, params: Option<serde_json::Value>) -> Result<(), B
 
 	let mut reader = BufReader::new(stream);
 	let mut response_str = String::new();
-	reader.read_line(&mut response_str)?;
 
-	let response: JsonRpcResponse = serde_json::from_str(&response_str)?;
+	// Читаем строки, игнорируя notifications, пока не получим ответ на наш запрос (id: 1)
+	let response: JsonRpcResponse = loop {
+		response_str.clear();
+		let bytes = reader.read_line(&mut response_str)?;
+		if bytes == 0 {
+			return Err("Unexpected EOF from daemon".into());
+		}
+		if response_str.trim().is_empty() {
+			continue;
+		}
+		// Пробуем распарсить как ответ
+		if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(&response_str) {
+			// Проверяем, что это ответ именно на наш запрос
+			if resp.id == Some(1) {
+				break resp;
+			}
+		}
+		// Если это notification или ответ с другим id, игнорируем и читаем следующую строку
+	};
 
 	if let Some(error) = response.error {
 		eprintln!("Error [{}]: {}", error.code, error.message);
@@ -132,7 +173,6 @@ fn format_response(result: serde_json::Value) -> String {
 	if result.is_null() {
 		"OK".to_string()
 	} else if let Some(obj) = result.as_object() {
-		// ИСПРАВЛЕНО: используем as_str() для извлечения строки без кавычек
 		if let Some(id) = obj.get("id").and_then(|v| v.as_str()) {
 			format!("Tab created: {}", id)
 		} else if let Some(res) = obj.get("result") {
@@ -173,14 +213,12 @@ fn main() {
 	let cli = Cli::parse();
 
 	let result = match cli.command {
-		Commands::Create { url, visible } => {
-			send_request("tab.create", Some(json!({ "url": url, "visible": visible })))
-		}
-		Commands::Close { id } => send_request("tab.close", Some(json!({ "id": id }))),
-		Commands::Navigate { id, url } => send_request("tab.navigate", Some(json!({ "id": id, "url": url }))),
-		Commands::Reload { id } => send_request("tab.reload", Some(json!({ "id": id }))),
-		Commands::List => send_request("tab.list", None),
-		Commands::Eval { id, script } => send_request("tab.eval", Some(json!({ "id": id, "script": script }))),
+		Commands::Create { url, visible } => send_request("create", Some(json!({ "url": url, "visible": visible }))),
+		Commands::Close { id } => send_request("close", Some(json!({ "id": id }))),
+		Commands::Navigate { id, url } => send_request("navigate", Some(json!({ "id": id, "url": url }))),
+		Commands::Reload { id } => send_request("reload", Some(json!({ "id": id }))),
+		Commands::List => send_request("list", None),
+		Commands::Eval { id, script } => send_request("eval", Some(json!({ "id": id, "script": script }))),
 	};
 
 	if let Err(e) = result {
@@ -193,31 +231,33 @@ fn main() {
 mod tests {
 	use super::*;
 
+	// --- Тесты для resolve_socket_path (чистые, без мутаций env) ---
+
 	#[test]
-	fn test_get_socket_path_with_ewd_socket_path() {
-		// SAFETY: Тесты не запускаются параллельно с production кодом, который читает EWD_SOCKET_PATH.
-		// Мы контролируем порядок выполнения и гарантируем отсутствие data race.
-		unsafe {
-			env::set_var("EWD_SOCKET_PATH", "/tmp/test.sock");
-		}
-		let path = get_socket_path();
-		assert_eq!(path, "/tmp/test.sock");
-		unsafe {
-			env::remove_var("EWD_SOCKET_PATH");
-		}
+	fn test_resolve_socket_path_ewd_has_priority() {
+		let path = resolve_socket_path(Some("/tmp/custom.sock"), Some("/run/user/1000"));
+		assert_eq!(path, Some("/tmp/custom.sock".to_string()));
 	}
 
 	#[test]
-	fn test_get_socket_path_without_ewd_socket_path() {
-		// SAFETY: Тесты не запускаются параллельно с production кодом, который читает XDG_RUNTIME_DIR.
-		// Мы контролируем порядок выполнения и гарантируем отсутствие data race.
-		unsafe {
-			env::remove_var("EWD_SOCKET_PATH");
-			env::remove_var("XDG_RUNTIME_DIR");
-		}
-		let path = get_socket_path();
-		assert_eq!(path, "/tmp/webkit-bridge.sock");
+	fn test_resolve_socket_path_falls_back_to_xdg() {
+		let path = resolve_socket_path(None, Some("/run/user/1000"));
+		assert_eq!(path, Some("/run/user/1000/webkit-bridge.sock".to_string()));
 	}
+
+	#[test]
+	fn test_resolve_socket_path_returns_none_when_both_missing() {
+		let path = resolve_socket_path(None, None);
+		assert_eq!(path, None);
+	}
+
+	#[test]
+	fn test_resolve_socket_path_ignores_empty_ewd() {
+		let path = resolve_socket_path(Some(""), Some("/run/user/1000"));
+		assert_eq!(path, Some("/run/user/1000/webkit-bridge.sock".to_string()));
+	}
+
+	// --- Тесты для format_response ---
 
 	#[test]
 	fn test_format_response_null() {

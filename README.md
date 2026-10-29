@@ -4,37 +4,44 @@ A high-performance, lightweight WebKitGTK daemon for headless and visible browse
 
 ## Overview
 
-**webkit-bridge** is a Rust-based project that provides a daemon (`ewd-daemon`) and CLI utility (`wkctl`) for managing WebKitGTK browser instances through a clean JSON-RPC API. It is designed for integration with Emacs, scripts, and other automation tools.
+`webkit-bridge` is a Rust-based project providing a daemon (`ewd-daemon`) and CLI utility (`wkctl`) for managing WebKitGTK browser instances through a clean JSON-RPC API. Designed for integration with scripts, automation tools, and any JSON-RPC 2.0 compatible client.
 
-### Key Features
+## Key Features
 
 - **Isolated tab management** with automatic cleanup of orphaned tabs
 - **Client-based access control** — each client can only manage tabs it created
 - **Proxy support** (SOCKS5, HTTP) for anonymous browsing
 - **Headless and visible modes** for flexible automation
-- **Real-time event notifications** via JSON-RPC notifications
+- **Push notifications** via `tabs_changed` JSON-RPC notifications
 - **Zero-copy Unix socket IPC** for maximum performance
+- **Graceful shutdown** via IPC command
 
-### Architecture
+## Architecture
 
 ```
 webkit-bridge/
 ├── ewd-core/          # Library crate (reusable API)
 ├── ewd-daemon/        # Binary crate (standalone daemon)
 ├── wkctl/             # CLI utility for testing
-└── emacs/             # Emacs client (separate project)
+└── bash/              # Integration tests
 ```
+
+- **`ewd-core`**: Shared library with `WebViewManager`, `Tab`, `Profile`, and event system
+- **`ewd-daemon`**: Standalone daemon with GTK main loop + Tokio async runtime
+- **`wkctl`**: CLI client for testing and scripting
+- **`bash/`**: Integration test suite
 
 ## System Requirements
 
 ### Supported Platforms
+
 - **OS**: Linux (tested on Debian 13, should work on any modern Linux distribution)
 - **Display**: Wayland or X11
 - **GPU**: Any GPU with proper drivers (tested on AMDGPU, Intel, NVIDIA)
 
 ### Required Dependencies
 
-**System packages** (Debian/Ubuntu example):
+**System packages (Debian/Ubuntu example):**
 ```bash
 sudo apt install \
   libwebkitgtk-6.0-dev \
@@ -45,22 +52,11 @@ sudo apt install \
   build-essential
 ```
 
-**Rust toolchain**:
+**Rust toolchain:**
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 ```
-
-## Environment Variables
-
-**Recommended for Wayland/AMDGPU stability** (optional but recommended):
-```bash
-export WEBKIT_DISABLE_COMPOSITING_MODE=1
-export WEBKIT_DISABLE_DMABUF_RENDERER=1
-export GDK_BACKEND=wayland
-```
-
-Add these to your `~/.profile`, `~/.bashrc`, or systemd service file.
 
 ## Installation
 
@@ -95,7 +91,7 @@ ewd-daemon --proxy socks5://127.0.0.1:9050
 
 The daemon will:
 1. Initialize GTK4 and WebKitGTK
-2. Create Unix socket at `$XDG_RUNTIME_DIR/webkit-bridge.sock` (or `/tmp/webkit-bridge.sock`)
+2. Create Unix socket at `$XDG_RUNTIME_DIR/webkit-bridge.sock` (default)
 3. Listen for JSON-RPC connections
 4. Log events to stdout
 
@@ -134,11 +130,26 @@ systemctl --user status ewd-daemon
 journalctl --user -u ewd-daemon -f
 ```
 
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `EWD_SOCKET_PATH` | Custom socket path (overrides default) |
+| `XDG_RUNTIME_DIR` | Standard XDG runtime directory (used if `EWD_SOCKET_PATH` is not set) |
+| `WEBKIT_DISABLE_COMPOSITING_MODE` | Recommended for Wayland/AMDGPU stability |
+| `WEBKIT_DISABLE_DMABUF_RENDERER` | Recommended for Wayland/AMDGPU stability |
+| `GDK_BACKEND` | Recommended: `wayland` |
+
+**Default socket path priority:**
+1. `EWD_SOCKET_PATH` (if set)
+2. `$XDG_RUNTIME_DIR/webkit-bridge.sock`
+3. Error if neither is set
+
 ## JSON-RPC API Reference
 
-The daemon communicates via **JSON-RPC 2.0** over Unix domain sockets using **Newline-Delimited JSON (NDJSON)** format.
+The daemon communicates via JSON-RPC 2.0 over Unix domain sockets using Newline-Delimited JSON (NDJSON) format.
 
-**Socket path**: `$XDG_RUNTIME_DIR/webkit-bridge.sock`
+**Socket path:** `$XDG_RUNTIME_DIR/webkit-bridge.sock` (default)
 
 ### Client Identification
 
@@ -146,7 +157,7 @@ Each connection receives a unique `client_id` (UUID). Clients can override this 
 
 ### Methods
 
-#### `tab.create`
+#### `create`
 
 Create a new browser tab.
 
@@ -154,11 +165,11 @@ Create a new browser tab.
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "tab.create",
+  "method": "create",
   "params": {
     "url": "https://example.com",
     "visible": true,
-    "profile": "default"
+    "client_id": "uuid-string"
   },
   "id": 1
 }
@@ -178,21 +189,20 @@ Create a new browser tab.
 **Parameters:**
 - `url` (string, optional): URL to load. Default: `"about:blank"`
 - `visible` (boolean, optional): Show GTK window. Default: `false`
-- `profile` (string, optional): Profile name. Default: `"default"`
+- `client_id` (string, optional): Override client UUID
 
----
+#### `close`
 
-#### `tab.close`
-
-Close an existing tab. **Only the owner client can close its tabs.**
+Close an existing tab. Only the owner client can close its tabs.
 
 **Request:**
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "tab.close",
+  "method": "close",
   "params": {
-    "id": "ac93f48c-9b3b-4b64-8852-966d2af207b9"
+    "id": "ac93f48c-9b3b-4b64-8852-966d2af207b9",
+    "client_id": "uuid-string"
   },
   "id": 2
 }
@@ -219,20 +229,19 @@ Close an existing tab. **Only the owner client can close its tabs.**
 }
 ```
 
----
+#### `navigate`
 
-#### `tab.navigate`
-
-Navigate a tab to a new URL. **Only the owner client can navigate its tabs.**
+Navigate a tab to a new URL. Only the owner client can navigate its tabs.
 
 **Request:**
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "tab.navigate",
+  "method": "navigate",
   "params": {
     "id": "ac93f48c-9b3b-4b64-8852-966d2af207b9",
-    "url": "https://example.org"
+    "url": "https://example.org",
+    "client_id": "uuid-string"
   },
   "id": 3
 }
@@ -247,19 +256,18 @@ Navigate a tab to a new URL. **Only the owner client can navigate its tabs.**
 }
 ```
 
----
+#### `reload`
 
-#### `tab.reload`
-
-Reload a tab. **Only the owner client can reload its tabs.**
+Reload a tab. Only the owner client can reload its tabs.
 
 **Request:**
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "tab.reload",
+  "method": "reload",
   "params": {
-    "id": "ac93f48c-9b3b-4b64-8852-966d2af207b9"
+    "id": "ac93f48c-9b3b-4b64-8852-966d2af207b9",
+    "client_id": "uuid-string"
   },
   "id": 4
 }
@@ -274,20 +282,19 @@ Reload a tab. **Only the owner client can reload its tabs.**
 }
 ```
 
----
+#### `eval`
 
-#### `tab.eval`
-
-Execute JavaScript in a tab context. **Only the owner client can evaluate JS in its tabs.**
+Execute JavaScript in a tab context. Only the owner client can evaluate JS in its tabs.
 
 **Request:**
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "tab.eval",
+  "method": "eval",
   "params": {
     "id": "ac93f48c-9b3b-4b64-8852-966d2af207b9",
-    "script": "document.title"
+    "script": "document.title",
+    "client_id": "uuid-string"
   },
   "id": 5
 }
@@ -304,18 +311,18 @@ Execute JavaScript in a tab context. **Only the owner client can evaluate JS in 
 }
 ```
 
----
+#### `list`
 
-#### `tab.list`
-
-List all open tabs. **Available to all clients (no ownership check).**
+List all open tabs. Available to all clients (no ownership check).
 
 **Request:**
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "tab.list",
-  "params": {},
+  "method": "list",
+  "params": {
+    "client_id": "uuid-string"
+  },
   "id": 6
 }
 ```
@@ -348,9 +355,7 @@ List all open tabs. **Available to all clients (no ownership check).**
 - `title` (string): Page title
 - `owner` (string): Short UUID (first 8 chars) of the owner client
 
----
-
-#### `daemon.shutdown`
+#### `shutdown`
 
 Shutdown the daemon gracefully.
 
@@ -358,8 +363,10 @@ Shutdown the daemon gracefully.
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "daemon.shutdown",
-  "params": {},
+  "method": "shutdown",
+  "params": {
+    "client_id": "uuid-string"
+  },
   "id": 7
 }
 ```
@@ -372,6 +379,22 @@ Shutdown the daemon gracefully.
   "id": 7
 }
 ```
+
+### Notifications
+
+#### `tabs_changed`
+
+Sent when any tab state changes (create, close, navigate, reload, title change). This is a **notification** (no `id` field), not a response.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tabs_changed",
+  "params": {}
+}
+```
+
+Clients should react by calling `list` to get the updated tab state.
 
 ### Error Codes
 
@@ -386,25 +409,44 @@ The `wkctl` CLI utility provides a convenient way to test the daemon:
 
 ```bash
 # Create a visible tab
-wkctl create --visible https://example.com
+wkctl create --url https://example.com --visible
 
 # List all tabs
 wkctl list
 
 # Navigate to a new URL
-wkctl navigate <tab-id> https://example.org
+wkctl navigate --id <tab-id> --url https://example.org
 
 # Reload the tab
-wkctl reload <tab-id>
+wkctl reload --id <tab-id>
 
 # Evaluate JavaScript
-wkctl eval <tab-id> "document.title"
+wkctl eval --id <tab-id> --script 'document.title'
 
 # Close the tab
-wkctl close <tab-id>
+wkctl close --id <tab-id>
+
+# Shutdown the daemon
+wkctl shutdown
 ```
 
 **Note:** `wkctl` uses a fixed `client_id` (`00000000-0000-0000-0000-000000000000`), so all `wkctl` invocations share ownership of tabs created via CLI.
+
+## Testing
+
+### Unit Tests
+
+```bash
+cargo test
+```
+
+### Integration Tests
+
+```bash
+./bash/integration.sh
+```
+
+See [bash/README.md](bash/README.md) for details.
 
 ## Troubleshooting
 
@@ -437,3 +479,5 @@ Tabs are owned by the client process (identified by PID). If the process dies un
 ## License
 
 ## Contributing
+
+Contributions are welcome! Please open an issue or submit a pull request.

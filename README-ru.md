@@ -4,37 +4,44 @@
 
 ## Обзор
 
-**webkit-bridge** — это проект на Rust, предоставляющий демон (`ewd-daemon`) и CLI-утилиту (`wkctl`) для управления экземплярами браузера WebKitGTK через чистый JSON-RPC API. Предназначен для интеграции с Emacs, скриптами и другими инструментами автоматизации.
+`webkit-bridge` — это проект на Rust, предоставляющий демон (`ewd-daemon`) и CLI-утилиту (`wkctl`) для управления экземплярами браузера WebKitGTK через чистый JSON-RPC API. Предназначен для интеграции со скриптами, инструментами автоматизации и любыми клиентами, совместимыми с JSON-RPC 2.0.
 
-### Ключевые особенности
+## Ключевые особенности
 
 - **Изолированное управление вкладками** с автоматической очисткой осиротевших вкладок
 - **Контроль доступа на основе клиентов** — каждый клиент может управлять только созданными им вкладками
 - **Поддержка прокси** (SOCKS5, HTTP) для анонимного просмотра
 - **Headless и видимый режимы** для гибкой автоматизации
-- **Уведомления о событиях в реальном времени** через JSON-RPC notifications
+- **Push-уведомления** через JSON-RPC notification `tabs_changed`
 - **Zero-copy Unix socket IPC** для максимальной производительности
+- **Graceful shutdown** через IPC-команду
 
-### Архитектура
+## Архитектура
 
 ```
 webkit-bridge/
 ├── ewd-core/          # Библиотечный крейт (переиспользуемый API)
 ├── ewd-daemon/        # Бинарный крейт (автономный демон)
 ├── wkctl/             # CLI-утилита для тестирования
-└── emacs/             # Emacs-клиент (отдельный проект)
+└── bash/              # Интеграционные тесты
 ```
+
+- **`ewd-core`**: Общая библиотека с `WebViewManager`, `Tab`, `Profile` и системой событий
+- **`ewd-daemon`**: Автономный демон с GTK main loop + Tokio async runtime
+- **`wkctl`**: CLI-клиент для тестирования и скриптов
+- **`bash/`**: Набор интеграционных тестов
 
 ## Системные требования
 
 ### Поддерживаемые платформы
+
 - **ОС**: Linux (тестировалось на Debian 13, должно работать на любом современном дистрибутиве Linux)
 - **Дисплей**: Wayland или X11
 - **GPU**: Любой GPU с правильными драйверами (тестировалось на AMDGPU, Intel, NVIDIA)
 
 ### Необходимые зависимости
 
-**Системные пакеты** (пример для Debian/Ubuntu):
+**Системные пакеты (пример для Debian/Ubuntu):**
 ```bash
 sudo apt install \
   libwebkitgtk-6.0-dev \
@@ -45,22 +52,11 @@ sudo apt install \
   build-essential
 ```
 
-**Rust toolchain**:
+**Rust toolchain:**
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 ```
-
-## Переменные окружения
-
-**Рекомендуется для стабильности на Wayland/AMDGPU** (опционально, но рекомендуется):
-```bash
-export WEBKIT_DISABLE_COMPOSITING_MODE=1
-export WEBKIT_DISABLE_DMABUF_RENDERER=1
-export GDK_BACKEND=wayland
-```
-
-Добавьте эти переменные в `~/.profile`, `~/.bashrc` или файл systemd-сервиса.
 
 ## Установка
 
@@ -95,7 +91,7 @@ ewd-daemon --proxy socks5://127.0.0.1:9050
 
 Демон выполнит:
 1. Инициализацию GTK4 и WebKitGTK
-2. Создание Unix-сокета в `$XDG_RUNTIME_DIR/webkit-bridge.sock` (или `/tmp/webkit-bridge.sock`)
+2. Создание Unix-сокета в `$XDG_RUNTIME_DIR/webkit-bridge.sock` (по умолчанию)
 3. Прослушивание JSON-RPC соединений
 4. Логирование событий в stdout
 
@@ -134,11 +130,26 @@ systemctl --user status ewd-daemon
 journalctl --user -u ewd-daemon -f
 ```
 
+## Переменные окружения
+
+| Переменная | Описание |
+|------------|----------|
+| `EWD_SOCKET_PATH` | Кастомный путь к сокету (переопределяет дефолтный) |
+| `XDG_RUNTIME_DIR` | Стандартная XDG runtime директория (используется, если `EWD_SOCKET_PATH` не установлен) |
+| `WEBKIT_DISABLE_COMPOSITING_MODE` | Рекомендуется для стабильности на Wayland/AMDGPU |
+| `WEBKIT_DISABLE_DMABUF_RENDERER` | Рекомендуется для стабильности на Wayland/AMDGPU |
+| `GDK_BACKEND` | Рекомендуется: `wayland` |
+
+**Приоритет пути к сокету по умолчанию:**
+1. `EWD_SOCKET_PATH` (если установлен)
+2. `$XDG_RUNTIME_DIR/webkit-bridge.sock`
+3. Ошибка, если оба отсутствуют
+
 ## Справочник JSON-RPC API
 
-Демон взаимодействует через **JSON-RPC 2.0** over Unix domain sockets, используя формат **Newline-Delimited JSON (NDJSON)**.
+Демон взаимодействует через JSON-RPC 2.0 over Unix domain sockets, используя формат Newline-Delimited JSON (NDJSON).
 
-**Путь к сокету**: `$XDG_RUNTIME_DIR/webkit-bridge.sock`
+**Путь к сокету:** `$XDG_RUNTIME_DIR/webkit-bridge.sock` (по умолчанию)
 
 ### Идентификация клиента
 
@@ -146,7 +157,7 @@ journalctl --user -u ewd-daemon -f
 
 ### Методы
 
-#### `tab.create`
+#### `create`
 
 Создать новую вкладку браузера.
 
@@ -154,11 +165,11 @@ journalctl --user -u ewd-daemon -f
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "tab.create",
+  "method": "create",
   "params": {
     "url": "https://example.com",
     "visible": true,
-    "profile": "default"
+    "client_id": "uuid-string"
   },
   "id": 1
 }
@@ -178,21 +189,20 @@ journalctl --user -u ewd-daemon -f
 **Параметры:**
 - `url` (string, опционально): URL для загрузки. По умолчанию: `"about:blank"`
 - `visible` (boolean, опционально): Показать GTK-окно. По умолчанию: `false`
-- `profile` (string, опционально): Имя профиля. По умолчанию: `"default"`
+- `client_id` (string, опционально): Переопределить UUID клиента
 
----
+#### `close`
 
-#### `tab.close`
-
-Закрыть существующую вкладку. **Только клиент-владелец может закрывать свои вкладки.**
+Закрыть существующую вкладку. Только клиент-владелец может закрывать свои вкладки.
 
 **Запрос:**
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "tab.close",
+  "method": "close",
   "params": {
-    "id": "ac93f48c-9b3b-4b64-8852-966d2af207b9"
+    "id": "ac93f48c-9b3b-4b64-8852-966d2af207b9",
+    "client_id": "uuid-string"
   },
   "id": 2
 }
@@ -219,20 +229,19 @@ journalctl --user -u ewd-daemon -f
 }
 ```
 
----
+#### `navigate`
 
-#### `tab.navigate`
-
-Перейти по новому URL в вкладке. **Только клиент-владелец может навигировать свои вкладки.**
+Перейти по новому URL в вкладке. Только клиент-владелец может навигировать свои вкладки.
 
 **Запрос:**
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "tab.navigate",
+  "method": "navigate",
   "params": {
     "id": "ac93f48c-9b3b-4b64-8852-966d2af207b9",
-    "url": "https://example.org"
+    "url": "https://example.org",
+    "client_id": "uuid-string"
   },
   "id": 3
 }
@@ -247,19 +256,18 @@ journalctl --user -u ewd-daemon -f
 }
 ```
 
----
+#### `reload`
 
-#### `tab.reload`
-
-Перезагрузить вкладку. **Только клиент-владелец может перезагружать свои вкладки.**
+Перезагрузить вкладку. Только клиент-владелец может перезагружать свои вкладки.
 
 **Запрос:**
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "tab.reload",
+  "method": "reload",
   "params": {
-    "id": "ac93f48c-9b3b-4b64-8852-966d2af207b9"
+    "id": "ac93f48c-9b3b-4b64-8852-966d2af207b9",
+    "client_id": "uuid-string"
   },
   "id": 4
 }
@@ -274,20 +282,19 @@ journalctl --user -u ewd-daemon -f
 }
 ```
 
----
+#### `eval`
 
-#### `tab.eval`
-
-Выполнить JavaScript в контексте вкладки. **Только клиент-владелец может выполнять JS в своих вкладках.**
+Выполнить JavaScript в контексте вкладки. Только клиент-владелец может выполнять JS в своих вкладках.
 
 **Запрос:**
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "tab.eval",
+  "method": "eval",
   "params": {
     "id": "ac93f48c-9b3b-4b64-8852-966d2af207b9",
-    "script": "document.title"
+    "script": "document.title",
+    "client_id": "uuid-string"
   },
   "id": 5
 }
@@ -304,18 +311,18 @@ journalctl --user -u ewd-daemon -f
 }
 ```
 
----
+#### `list`
 
-#### `tab.list`
-
-Список всех открытых вкладок. **Доступно всем клиентам (без проверки владельца).**
+Список всех открытых вкладок. Доступно всем клиентам (без проверки владельца).
 
 **Запрос:**
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "tab.list",
-  "params": {},
+  "method": "list",
+  "params": {
+    "client_id": "uuid-string"
+  },
   "id": 6
 }
 ```
@@ -348,9 +355,7 @@ journalctl --user -u ewd-daemon -f
 - `title` (string): Заголовок страницы
 - `owner` (string): Короткий UUID (первые 8 символов) клиента-владельца
 
----
-
-#### `daemon.shutdown`
+#### `shutdown`
 
 Корректно завершить работу демона.
 
@@ -358,8 +363,10 @@ journalctl --user -u ewd-daemon -f
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "daemon.shutdown",
-  "params": {},
+  "method": "shutdown",
+  "params": {
+    "client_id": "uuid-string"
+  },
   "id": 7
 }
 ```
@@ -372,6 +379,22 @@ journalctl --user -u ewd-daemon -f
   "id": 7
 }
 ```
+
+### Уведомления
+
+#### `tabs_changed`
+
+Отправляется при любом изменении состояния вкладок (создание, закрытие, навигация, перезагрузка, изменение заголовка). Это **notification** (без поля `id`), а не ответ.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tabs_changed",
+  "params": {}
+}
+```
+
+Клиенты должны реагировать вызовом `list` для получения актуального состояния вкладок.
 
 ### Коды ошибок
 
@@ -386,25 +409,44 @@ CLI-утилита `wkctl` предоставляет удобный спосо�
 
 ```bash
 # Создать видимую вкладку
-wkctl create --visible https://example.com
+wkctl create --url https://example.com --visible
 
 # Список всех вкладок
 wkctl list
 
 # Перейти по новому URL
-wkctl navigate <tab-id> https://example.org
+wkctl navigate --id <tab-id> --url https://example.org
 
 # Перезагрузить вкладку
-wkctl reload <tab-id>
+wkctl reload --id <tab-id>
 
 # Выполнить JavaScript
-wkctl eval <tab-id> "document.title"
+wkctl eval --id <tab-id> --script 'document.title'
 
 # Закрыть вкладку
-wkctl close <tab-id>
+wkctl close --id <tab-id>
+
+# Завершить работу демона
+wkctl shutdown
 ```
 
 **Примечание:** `wkctl` использует фиксированный `client_id` (`00000000-0000-0000-0000-000000000000`), поэтому все вызовы `wkctl` совместно владеют вкладками, созданными через CLI.
+
+## Тестирование
+
+### Unit-тесты
+
+```bash
+cargo test
+```
+
+### Интеграционные тесты
+
+```bash
+./bash/integration.sh
+```
+
+См. [bash/README.md](bash/README.md) для подробностей.
 
 ## Решение проблем
 
@@ -437,3 +479,5 @@ rm $XDG_RUNTIME_DIR/webkit-bridge.sock
 ## Лицензия
 
 ## Участие в разработке
+
+Вклад приветствуется! Пожалуйста, откройте issue или отправьте pull request.

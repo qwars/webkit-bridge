@@ -21,7 +21,7 @@ main() {
         id_files+=("$id_file")
         (
             local output
-            if ! output=$(wkctl tab.create --url "https://concurrent-$i.example.com" 2>&1); then
+            if ! output=$(wkctl create --url "https://concurrent-$i.example.com" 2>&1); then
                 echo "ERROR creating tab $i: $output" >&2
                 exit 1
             fi
@@ -38,7 +38,7 @@ main() {
 
     log INFO "=== Test: All 10 tabs visible in list ==="
     local list_output
-    list_output="$(wkctl tab.list 2>/dev/null)"
+    list_output="$(wkctl list 2>/dev/null)"
 
     local count=0
     for id_file in "${id_files[@]}"; do
@@ -69,7 +69,7 @@ main() {
             tab_id="$(cat "$id_file" | tr -d '\r\n ')"
             (
                 log INFO "DEBUG: Attempting to close: '$tab_id'"
-                if ! close_output=$(wkctl tab.close --id "$tab_id" 2>&1); then
+                if ! close_output=$(wkctl close --id "$tab_id" 2>&1); then
                     log WARN "DEBUG: wkctl close failed for '$tab_id'. Output: $close_output"
                 fi
             ) &
@@ -84,7 +84,7 @@ main() {
     assert_success "0" "all concurrent closes completed (failures: $failed)"
 
     log INFO "=== Test: All tabs closed ==="
-    list_output="$(wkctl tab.list 2>/dev/null)"
+    list_output="$(wkctl list 2>/dev/null)"
     assert_contains "$list_output" "No tabs" "all tabs closed"
 
     stop_daemon

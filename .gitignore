@@ -6,3 +6,6 @@
 **/*.rs.bk
 *.tar.gz
 /release-pkg/
+
+*.log
+bash/*.log

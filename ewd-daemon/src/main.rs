@@ -52,8 +52,8 @@ fn main() -> Result<()> {
 
 	let socket_path = env::var("EWD_SOCKET_PATH").unwrap_or_else(|_| {
 		env::var("XDG_RUNTIME_DIR")
-			.map(|dir| format!("{}/webkit-bridge.sock", dir))
-			.unwrap_or_else(|_| "/tmp/webkit-bridge.sock".to_string())
+			.map(|dir| format!("{dir}/webkit-bridge.sock"))
+			.expect("XDG_RUNTIME_DIR is not set. Please set it or use EWD_SOCKET_PATH.")
 	});
 	let socket_path_clone = socket_path.clone();
 
@@ -168,7 +168,7 @@ fn main() -> Result<()> {
 
 					// Подключение сигнала uri для TabNavigated
 					let event_tx_uri = manager.event_tx();
-					let webview_uri = tab.webview.clone();
+					let webview_uri = webview.clone();
 					webview_uri.connect_notify_local(Some("uri"), move |wv, _| {
 						if let Some(uri) = wv.uri() {
 							let _ = event_tx_uri.send(DaemonEvent::TabNavigated {
