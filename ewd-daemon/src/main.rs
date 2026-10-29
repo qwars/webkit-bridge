@@ -11,7 +11,6 @@ use std::env;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
-use tracing_subscriber;
 use uuid::Uuid;
 use webkit6::prelude::*;
 
@@ -48,15 +47,16 @@ fn main() -> Result<()> {
 
 	let main_loop = gtk4::glib::MainLoop::new(None, false);
 	let main_loop_clone = main_loop.clone();
-
 	let manager_tokio = Arc::clone(&manager);
 	let manager_ipc = Arc::clone(&manager);
 
-	let socket_path = env::var("XDG_RUNTIME_DIR")
-		.map(|dir| format!("{}/webkit-bridge.sock", dir))
-		.unwrap_or_else(|_| "/tmp/webkit-bridge.sock".to_string());
-
+	let socket_path = env::var("EWD_SOCKET_PATH").unwrap_or_else(|_| {
+		env::var("XDG_RUNTIME_DIR")
+			.map(|dir| format!("{}/webkit-bridge.sock", dir))
+			.unwrap_or_else(|_| "/tmp/webkit-bridge.sock".to_string())
+	});
 	let socket_path_clone = socket_path.clone();
+
 	std::thread::spawn(move || {
 		let rt = tokio::runtime::Builder::new_multi_thread()
 			.enable_all()
@@ -70,26 +70,41 @@ fn main() -> Result<()> {
 			}
 
 			let server = IpcServer::new(&socket_path_clone, manager_ipc);
-
 			let server_handle = tokio::spawn(async move {
 				if let Err(e) = server.start().await {
 					warn!("Server error: {}", e);
 				}
 			});
 
+			// Фоновая задача для очистки осиротевших табов (каждые 60 секунд)
+			let manager_for_cleanup = Arc::clone(&manager_tokio);
 			tokio::spawn(async move {
 				let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
 				loop {
 					interval.tick().await;
-					manager_tokio.cleanup_orphans().await;
+					manager_for_cleanup.cleanup_orphans().await;
 				}
 			});
 
-			if let Err(_) = tokio::signal::ctrl_c().await {
-				warn!("Failed to listen for shutdown signal");
+			// УНИФИКАЦИЯ ЗАВЕРШЕНИЯ: ждем либо Ctrl+C, либо события Shutdown из канала
+			let mut shutdown_rx = manager_tokio.subscribe();
+
+			tokio::select! {
+				_ = tokio::signal::ctrl_c() => {
+					info!("Ctrl+C received in Tokio thread");
+				}
+				_ = async {
+					while let Ok(event) = shutdown_rx.recv().await {
+						if matches!(event, DaemonEvent::Shutdown) {
+							break;
+						}
+					}
+				} => {
+					info!("Shutdown event received via IPC in Tokio thread");
+				}
 			}
 
-			info!("Shutting down EWD daemon (Tokio)");
+			info!("Shutting down EWD daemon (Tokio cleanup)");
 			server_handle.abort();
 
 			if Path::new(&socket_path_clone).exists() {
@@ -101,8 +116,22 @@ fn main() -> Result<()> {
 		});
 	});
 
+	let main_loop_for_shutdown = main_loop.clone();
+
 	gtk4::glib::MainContext::default().spawn_local(async move {
 		let tabs = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::<Uuid, Tab>::new()));
+
+		// Подписка на события для обработки Shutdown
+		let mut event_rx = manager.subscribe();
+		gtk4::glib::MainContext::default().spawn_local(async move {
+			while let Ok(event) = event_rx.recv().await {
+				if matches!(event, DaemonEvent::Shutdown) {
+					info!("Shutdown event received in GTK thread, stopping main loop");
+					main_loop_for_shutdown.quit();
+					break;
+				}
+			}
+		});
 
 		while let Some(cmd) = gtk_rx.recv().await {
 			match cmd {
@@ -116,19 +145,16 @@ fn main() -> Result<()> {
 				} => {
 					let id = Uuid::new_v4();
 					let tab = Tab::new(id, &url, visible, manager.proxy_uri(), client_id, owner_pid);
-
 					if let Some(ref win) = tab.window {
 						let id_clone = id;
 						let tabs_clone = std::rc::Rc::clone(&tabs);
 						let event_tx_clone = manager.event_tx();
-
 						win.connect_close_request(move |_| {
 							tabs_clone.borrow_mut().remove(&id_clone);
 							let _ = event_tx_clone.send(DaemonEvent::TabClosed { id: id_clone });
 							gtk4::glib::Propagation::Proceed
 						});
 					}
-
 					let event_tx = manager.event_tx();
 					let webview = tab.webview.clone();
 					webview.connect_notify_local(Some("title"), move |wv, _| {
@@ -140,12 +166,23 @@ fn main() -> Result<()> {
 						}
 					});
 
+					// Подключение сигнала uri для TabNavigated
+					let event_tx_uri = manager.event_tx();
+					let webview_uri = tab.webview.clone();
+					webview_uri.connect_notify_local(Some("uri"), move |wv, _| {
+						if let Some(uri) = wv.uri() {
+							let _ = event_tx_uri.send(DaemonEvent::TabNavigated {
+								id,
+								url: uri.to_string(),
+							});
+						}
+					});
+
 					tabs.borrow_mut().insert(id, tab);
 					let _ = tx.send(id);
 				}
 				ManagerCommand::Close { id, client_id, tx } => {
 					let tab_to_close = tabs.borrow_mut().remove(&id);
-
 					let res = match tab_to_close {
 						Some(tab) => {
 							if tab.owner_client_id != client_id {
@@ -154,6 +191,9 @@ fn main() -> Result<()> {
 							} else {
 								if let Some(win) = tab.window {
 									win.close();
+								} else {
+									let _ = manager.event_tx().send(DaemonEvent::TabClosed { id });
+									info!("Headless tab {} closed", id);
 								}
 								Ok(())
 							}
@@ -213,7 +253,6 @@ fn main() -> Result<()> {
 							None
 						}
 					});
-
 					match webview_opt {
 						Some(webview) => {
 							let eval_res = match webview.evaluate_javascript_future(&script, None, None).await {
@@ -254,7 +293,6 @@ fn main() -> Result<()> {
 							.map(|(id, tab)| (*id, tab.window.clone()))
 							.collect()
 					};
-
 					for (id, win_opt) in to_close {
 						if let Some(win) = win_opt {
 							info!("Orphan tab {} closed (owner process is dead)", id);
@@ -272,4 +310,30 @@ fn main() -> Result<()> {
 
 	main_loop.run();
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_is_process_alive_current_process() {
+		let pid = std::process::id() as i32;
+		assert!(is_process_alive(pid));
+	}
+
+	#[test]
+	fn test_is_process_alive_invalid_pid_zero() {
+		assert!(!is_process_alive(0));
+	}
+
+	#[test]
+	fn test_is_process_alive_invalid_pid_negative() {
+		assert!(!is_process_alive(-1));
+	}
+
+	#[test]
+	fn test_is_process_alive_nonexistent_pid() {
+		assert!(!is_process_alive(999999));
+	}
 }

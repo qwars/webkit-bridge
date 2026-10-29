@@ -65,15 +65,12 @@ impl IpcServer {
 	pub async fn start(&self) -> Result<()> {
 		let listener = UnixListener::bind(&self.socket_path)?;
 		info!("IPC server listening on {}", self.socket_path);
-
 		loop {
 			match listener.accept().await {
 				Ok((stream, _)) => {
 					let client_id = Uuid::new_v4();
 					let pid = getsockopt(&stream, PeerCredentials).ok().map(|cred| cred.pid());
-
 					info!("New client connected: {} (PID: {:?})", short_uuid(&client_id), pid);
-
 					let manager = Arc::clone(&self.manager);
 					tokio::spawn(async move {
 						if let Err(e) = Self::handle_client(stream, manager, client_id, pid).await {
@@ -97,20 +94,16 @@ impl IpcServer {
 		let (reader, mut writer) = stream.into_split();
 		let mut reader = BufReader::new(reader);
 		let mut line = String::new();
-
 		loop {
 			line.clear();
 			let bytes_read = reader.read_line(&mut line).await?;
-
 			if bytes_read == 0 {
 				info!("Client disconnected: {}", short_uuid(&session_client_id));
 				break;
 			}
-
 			if line.trim().is_empty() {
 				continue;
 			}
-
 			let request: JsonRpcRequest = match serde_json::from_str::<JsonRpcRequest>(line.trim()) {
 				Ok(req) if req.jsonrpc == "2.0" => req,
 				_ => {
@@ -130,13 +123,11 @@ impl IpcServer {
 					continue;
 				}
 			};
-
 			let response = Self::process_request(request, &manager, session_client_id, owner_pid).await;
 			let response_json = serde_json::to_string(&response)?;
 			writer.write_all(response_json.as_bytes()).await?;
 			writer.write_all(b"\n").await?;
 		}
-
 		Ok(())
 	}
 
@@ -168,6 +159,7 @@ impl IpcServer {
 			request.method,
 			short_uuid(&effective_client_id)
 		);
+
 		let event_tx = manager.event_tx();
 
 		match request.method.as_str() {
@@ -189,22 +181,28 @@ impl IpcServer {
 					.and_then(|p| p.get("profile").and_then(|v| v.as_str()))
 					.unwrap_or("default")
 					.to_string();
-
-				let id = manager
+				match manager
 					.create_tab(&url, visible, &profile, effective_client_id, owner_pid)
-					.await;
-				let _ = event_tx.send(DaemonEvent::TabCreated { id, url: url.clone() });
-				info!(
-					"Tab created successfully: {} by client {}",
-					id,
-					short_uuid(&effective_client_id)
-				);
-
-				JsonRpcResponse {
-					jsonrpc: "2.0".to_string(),
-					result: Some(serde_json::json!({"id": id.to_string()})),
-					error: None,
-					id: request.id,
+					.await
+				{
+					Ok(id) => {
+						let _ = event_tx.send(DaemonEvent::TabCreated { id, url: url.clone() });
+						info!(
+							"Tab created successfully: {} by client {}",
+							id,
+							short_uuid(&effective_client_id)
+						);
+						JsonRpcResponse {
+							jsonrpc: "2.0".to_string(),
+							result: Some(serde_json::json!({"id": id.to_string()})),
+							error: None,
+							id: request.id,
+						}
+					}
+					Err(e) => {
+						warn!("Failed to create tab: {}", e);
+						Self::error_response(-32000, e.to_string(), request.id)
+					}
 				}
 			}
 			"tab.close" => {
@@ -220,10 +218,8 @@ impl IpcServer {
 						return Self::error_response(-32602, "Invalid params: invalid UUID".to_string(), request.id);
 					}
 				};
-
 				match manager.close_tab(&tab_id, effective_client_id).await {
 					Ok(()) => {
-						let _ = event_tx.send(DaemonEvent::TabClosed { id: tab_id });
 						info!("Tab closed successfully: {}", tab_id);
 						JsonRpcResponse {
 							jsonrpc: "2.0".to_string(),
@@ -257,7 +253,6 @@ impl IpcServer {
 						return Self::error_response(-32602, "Invalid params: invalid UUID".to_string(), request.id);
 					}
 				};
-
 				match manager.navigate_tab(&tab_id, &url, effective_client_id).await {
 					Ok(()) => {
 						let _ = event_tx.send(DaemonEvent::TabNavigated {
@@ -291,7 +286,6 @@ impl IpcServer {
 						return Self::error_response(-32602, "Invalid params: invalid UUID".to_string(), request.id);
 					}
 				};
-
 				match manager.reload_tab(&tab_id, effective_client_id).await {
 					Ok(()) => {
 						let _ = event_tx.send(DaemonEvent::TabReloaded { id: tab_id });
@@ -322,15 +316,13 @@ impl IpcServer {
 					.and_then(|p| p.get("script").and_then(|v| v.as_str()))
 					.unwrap_or("")
 					.to_string();
-
 				let tab_id = match Uuid::parse_str(&id_str) {
 					Ok(id) => id,
 					Err(_) => {
 						return Self::error_response(-32602, "Invalid params: invalid UUID".to_string(), request.id);
 					}
 				};
-
-				match manager.eval_tab(&tab_id, &script, effective_client_id).await {
+				match manager.eval_script(&tab_id, &script, effective_client_id).await {
 					Ok(result) => {
 						info!("Evaluated JS successfully in tab {}", tab_id);
 						JsonRpcResponse {
@@ -359,7 +351,6 @@ impl IpcServer {
 						})
 					})
 					.collect();
-
 				info!("Listed {} tabs", tabs_json.len());
 				JsonRpcResponse {
 					jsonrpc: "2.0".to_string(),
@@ -383,5 +374,91 @@ impl IpcServer {
 				Self::error_response(-32601, format!("Method not found: {}", request.method), request.id)
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_short_uuid_returns_8_chars() {
+		let uuid = Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap();
+		let short = short_uuid(&uuid);
+		assert_eq!(short, "12345678");
+		assert_eq!(short.len(), 8);
+	}
+
+	#[test]
+	fn test_jsonrpc_request_parse_valid() {
+		let json = r#"{"jsonrpc":"2.0","method":"tab.create","params":{"url":"https://example.com"},"id":1}"#;
+		let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
+		assert_eq!(req.jsonrpc, "2.0");
+		assert_eq!(req.method, "tab.create");
+		assert!(req.params.is_some());
+		assert!(req.id.is_some());
+	}
+
+	#[test]
+	fn test_jsonrpc_request_parse_without_params() {
+		let json = r#"{"jsonrpc":"2.0","method":"tab.list","id":2}"#;
+		let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
+		assert_eq!(req.method, "tab.list");
+		assert!(req.params.is_none());
+	}
+
+	#[test]
+	fn test_jsonrpc_request_parse_invalid_json() {
+		let json = r#"{"jsonrpc":"2.0","method":"tab.create""#;
+		let result: Result<JsonRpcRequest, _> = serde_json::from_str(json);
+		assert!(result.is_err());
+	}
+
+	#[test]
+	fn test_error_response_format() {
+		let resp = JsonRpcResponse {
+			jsonrpc: "2.0".to_string(),
+			result: None,
+			error: Some(JsonRpcError {
+				code: -32600,
+				message: "Invalid Request".to_string(),
+			}),
+			id: Some(serde_json::json!(1)),
+		};
+		assert_eq!(resp.jsonrpc, "2.0");
+		assert!(resp.result.is_none());
+		assert!(resp.error.is_some());
+		let err = resp.error.unwrap();
+		assert_eq!(err.code, -32600);
+		assert_eq!(err.message, "Invalid Request");
+	}
+
+	#[test]
+	fn test_jsonrpc_response_serialize_success() {
+		let resp = JsonRpcResponse {
+			jsonrpc: "2.0".to_string(),
+			result: Some(serde_json::json!({"id": "test-uuid"})),
+			error: None,
+			id: Some(serde_json::json!(1)),
+		};
+		let json = serde_json::to_string(&resp).unwrap();
+		assert!(json.contains("\"result\""));
+		assert!(!json.contains("\"error\""));
+	}
+
+	#[test]
+	fn test_jsonrpc_response_serialize_error() {
+		let resp = JsonRpcResponse {
+			jsonrpc: "2.0".to_string(),
+			result: None,
+			error: Some(JsonRpcError {
+				code: -32601,
+				message: "Method not found".to_string(),
+			}),
+			id: Some(serde_json::json!(2)),
+		};
+		let json = serde_json::to_string(&resp).unwrap();
+		assert!(json.contains("\"error\""));
+		assert!(!json.contains("\"result\""));
 	}
 }

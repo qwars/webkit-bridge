@@ -1,0 +1,42 @@
+[2026-10-29 06:35:02] [INFO] Test environment: EWD_SOCKET_PATH=/tmp/ewd-test-397300/webkit-bridge.sock
+[2026-10-29 06:35:02] [INFO] Original XDG_RUNTIME_DIR preserved for GTK: /run/user/1000
+[2026-10-29 06:35:02] [INFO] Log file: /home/qwars/Public/DotS.projects/rust-selenium-learning/webkit-bridge/bash/test.log
+[2026-10-29 06:35:02] [INFO] All dependencies satisfied
+[2026-10-29 06:35:02] [INFO] Starting daemon with socket: /tmp/ewd-test-397300/webkit-bridge.sock
+[2026-10-29 06:35:02] [INFO] Daemon started with PID: 397312
+[2026-10-29 06:35:03] [INFO] Daemon socket ready
+[2026-10-29 06:35:03] [INFO] === Test: Orphan cleanup (this takes ~65 seconds) ===
+[2026-10-29 06:35:03] [INFO] 1. Creating a tab from a background client process
+[2026-10-29 06:35:03] [INFO]    Background client started with PID: 397335
+[2026-10-29 06:35:03] [INFO] wkctl tab.create --url https://orphan-test.example.com
+[2026-10-29 06:35:05] [INFO]    Created orphan tab with ID: b890a394-9241-4660-b91e-733afb08d3e5
+[2026-10-29 06:35:05] [INFO] 2. Verifying tab exists before client death
+[2026-10-29 06:35:05] [INFO] wkctl tab.list
+[2026-10-29 06:35:05] [PASS] ✓ orphan tab exists before client death (contains: b890a394-9241-4660-b91e-733afb08d3e5)
+[2026-10-29 06:35:05] [INFO] 3. Killing the client process (PID: 397335)
+[2026-10-29 06:35:05] [INFO]    Client process killed.
+[2026-10-29 06:35:05] [INFO] 4. Waiting for orphan cleanup (60s interval + 5s buffer = 65s)
+[2026-10-29 06:35:10] [INFO]    ... waited 5s / 65s
+[2026-10-29 06:35:15] [INFO]    ... waited 10s / 65s
+[2026-10-29 06:35:20] [INFO]    ... waited 15s / 65s
+[2026-10-29 06:35:25] [INFO]    ... waited 20s / 65s
+[2026-10-29 06:35:30] [INFO]    ... waited 25s / 65s
+[2026-10-29 06:35:35] [INFO]    ... waited 30s / 65s
+[2026-10-29 06:35:40] [INFO]    ... waited 35s / 65s
+[2026-10-29 06:35:45] [INFO]    ... waited 40s / 65s
+[2026-10-29 06:35:50] [INFO]    ... waited 45s / 65s
+[2026-10-29 06:35:55] [INFO]    ... waited 50s / 65s
+[2026-10-29 06:36:00] [INFO]    ... waited 55s / 65s
+[2026-10-29 06:36:05] [INFO]    ... waited 60s / 65s
+[2026-10-29 06:36:10] [INFO]    ... waited 65s / 65s
+[2026-10-29 06:36:10] [INFO] 5. Verifying tab is gone after cleanup
+[2026-10-29 06:36:10] [INFO] wkctl tab.list
+[2026-10-29 06:36:10] [INFO]    List output after cleanup: [0;34m[INFO][0m wkctl tab.list
+No tabs open
+[2026-10-29 06:36:10] [PASS] ✓ orphan tab cleaned up after client death (contains: No tabs)
+[2026-10-29 06:36:10] [INFO] Stopping daemon (PID: 397312)
+[2026-10-29 06:36:11] [INFO] Cleaning up test environment
+[2026-10-29 06:36:11] [INFO] Cleanup complete
+[2026-10-29 06:36:11] [PASS] Test suite 'orphan' completed successfully
+[2026-10-29 06:36:11] [INFO] Cleaning up test environment
+[2026-10-29 06:36:11] [INFO] Cleanup complete

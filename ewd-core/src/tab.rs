@@ -25,11 +25,11 @@ impl Tab {
 	) -> Self {
 		let webview = WebView::new();
 
-		if let Some(proxy) = proxy_uri {
-			if let Some(session) = webview.network_session() {
-				let proxy_settings = NetworkProxySettings::new(Some(proxy.as_str()), &[]);
-				session.set_proxy_settings(NetworkProxyMode::Custom, Some(&proxy_settings));
-			}
+		if let Some(proxy) = proxy_uri
+			&& let Some(session) = webview.network_session()
+		{
+			let proxy_settings = NetworkProxySettings::new(Some(proxy.as_str()), &[]);
+			session.set_proxy_settings(NetworkProxyMode::Custom, Some(&proxy_settings));
 		}
 
 		webview.load_uri(url);
