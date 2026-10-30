@@ -9,6 +9,7 @@ EWD (Emacs WebKit Daemon) is an Emacs Lisp package that connects to the `webkit-
 - Browse the web using WebKitGTK without leaving Emacs
 - Automate web interactions via JavaScript evaluation
 - Manage multiple browser tabs with a dedicated buffer interface
+- Show/hide tabs interactively (e.g., to solve CAPTCHAs manually)
 - Scrape web content programmatically
 - Integrate web browsing with your Emacs workflow
 
@@ -18,10 +19,15 @@ EWD is not a browser itself — it's a client that talks to the standalone `webk
 
 ### Tab Management
 - Create, close, navigate, and reload tabs
+- **Show/hide tabs**: toggle GTK window visibility for any tab (useful for CAPTCHAs and interactive pages)
 - Dedicated `*ewd-tabs*` buffer for visual tab management
-- **Push-based updates**: the buffer refreshes automatically when any tab state changes (via `tabs_changed` notification)
-- **Cursor preservation**: cursor position is preserved across buffer redraws
-- Visual distinction: `*` marker for tabs owned by Emacs, gray text for external tabs
+- Push-based updates: the buffer refreshes automatically via `tabs_changed` notifications
+- Cursor preservation: cursor position is preserved across buffer redraws
+- Visual distinction:
+  - `*` marker for tabs owned by Emacs
+  - `[V]` / `[H]` markers for visible / hidden tabs
+  - Colored text for tabs owned by this session
+  - Gray text for external tabs
 
 ### JavaScript Evaluation
 - Execute arbitrary JavaScript in any tab context
@@ -29,9 +35,9 @@ EWD is not a browser itself — it's a client that talks to the standalone `webk
 - Perfect for web scraping and automation
 
 ### Security & Isolation
-- **Owner-based access control**: Emacs can only manage tabs it created
+- Owner-based access control: Emacs can only manage tabs it created
 - Tabs created by other clients (e.g., `wkctl`, other Emacs instances) are visible but displayed in gray
-- **Automatic cleanup**: all Emacs-owned tabs are closed silently when Emacs exits (no confirmation prompts)
+- Automatic cleanup: all Emacs-owned tabs are closed silently when Emacs exits (no confirmation prompts)
 
 ### Reactive UI
 - Real-time updates via `tabs_changed` notifications from the daemon
@@ -41,8 +47,8 @@ EWD is not a browser itself — it's a client that talks to the standalone `webk
 ## Requirements
 
 ### Emacs
-- **Emacs 30+** (required)
-- Compiled with `json-parse-string` support (standard in modern builds)
+- Emacs 28.1+ (30+ recommended)
+- Compiled with `json-parse-string` support
 
 ### Daemon
 - `webkit-bridge` daemon must be running
@@ -87,8 +93,8 @@ Add to your `init.el`:
 
 Access via `M-x customize-group RET ewd RET`:
 
-`ewd-socket-path` `nil`
-	(auto-detect) Path to daemon socket. If `nil`, uses `$EWD_SOCKET_PATH`, then `$XDG_RUNTIME_DIR/webkit-bridge.sock`, then `/tmp/webkit-bridge.sock`
+ `ewd-socket-path` `nil` (auto-detect) 
+      Path to daemon socket. If `nil`, uses `$EWD_SOCKET_PATH`, then `$XDG_RUNTIME_DIR/webkit-bridge.sock`
 
 ### Example Configuration
 
@@ -116,6 +122,8 @@ All commands are bound under the `C-c w` prefix:
 | `C-c w n`  | `ewd-navigate`      | Navigate a tab to a new URL               |
 | `C-c w r`  | `ewd-reload`        | Reload a tab                              |
 | `C-c w o`  | `ewd-switch-to-tab` | Open tab URL in system browser            |
+| `C-c w S`  | `ewd-show-tab`      | Show tab in GTK window                    |
+| `C-c w H`  | `ewd-hide-tab`      | Hide tab (convert to headless)            |
 
 ### The `*ewd-tabs*` Buffer
 
@@ -126,13 +134,14 @@ EWD Tabs (2 open, client 1e04045b-5b84-4b71-b11f-7cb85e5f4846)
 ============================================================
 
 Legend: * = owned by this Emacs session
-        gray text = owned by another client
+        [V] = visible, [H] = hide
+        colored text = owned by this session
 
-* [ed93a3ff-51bf-4abb-b23a-fba027dfca9f] Example Domain
+* [V] [ed93a3ff-51bf-4abb-b23a-fba027dfca9f] Example Domain
   URL: https://example.com
   Owner: 1e04045b
 
-  [88341d6e-ddea-4b14-9278-e95f538c3b57] Google
+  [H] [88341d6e-ddea-4b14-9278-e95f538c3b57] Google
   URL: https://google.com
   Owner: 00000000
 ```
@@ -140,19 +149,22 @@ Legend: * = owned by this Emacs session
 **Legend:**
 - `*` prefix = tab owned by this Emacs instance (can be modified)
 - No prefix + gray text = tab owned by another client (read-only in this session)
+- `[V]` = tab is visible in a GTK window
+- `[H]` = tab is hidden (headless)
 - `Owner:` = short UUID (8 chars) of the owner client
 
 ### Buffer Keybindings
 
-| Key   | Command                  | Description             |
-|-------|--------------------------|-------------------------|
-| `g`   | `ewd-list-tabs`          | Refresh the list        |
-| `k`   | `ewd-close-tab-at-point` | Close the tab at point  |
-| `o`   | `ewd-open-tab-at-point`  | Open tab URL in browser |
-| `RET` | `ewd-open-tab-at-point`  | Open tab URL in browser |
-| `q`   | `quit-window`            | Close the buffer        |
+| Key         | Command                  | Description                    |
+|-------------|--------------------------|--------------------------------|
+| `g`         | `ewd-list-tabs`          | Refresh the list               |
+| `k`         | `ewd-close-tab-at-point` | Close the tab at point         |
+| `o` / `RET` | `ewd-open-tab-at-point`  | Open tab URL in browser        |
+| `s`         | `ewd-show-tab-at-point`  | Show tab in GTK window         |
+| `h`         | `ewd-hide-tab-at-point`  | Hide tab (convert to headless) |
+| `q`         | `quit-window`            | Close the buffer               |
 
-**Note:** `k`, `o`, and `RET` work from **any line** within the tab's block (UUID line, URL line, or Owner line).
+> **Note:** `k`, `o`, `RET`, `s`, and `h` work from **any line** within the tab's block (UUID line, URL line, or Owner line).
 
 ### Typical Workflow
 
@@ -165,22 +177,24 @@ Legend: * = owned by this Emacs session
    Press `C-c w c`
 
 3. **Create a tab:**
-   - Press `C-c w t`
-   - Enter URL: `https://example.com`
-   - Press `RET`
+   Press `C-c w t`, enter URL: `https://example.com`, press `RET`
 
 4. **View tabs:**
-   - Press `C-c w l`
+   Press `C-c w l`
    - Navigate with arrow keys
    - Press `k` to close, `o` or `RET` to open in browser
+   - Press `s` to show in GTK window, `h` to hide
 
-5. **Evaluate JavaScript:**
-   - Press `C-c w e`
-   - Enter tab ID (or use `e` in the tabs buffer)
-   - Enter script: `document.title`
-   - Result appears in the minibuffer and `*ewd-eval*` buffer
+5. **Handle CAPTCHA or interactive page:**
+   - Press `s` on the tab to show its GTK window
+   - Solve the CAPTCHA manually
+   - Press `h` to hide the window again
 
-6. **Exit Emacs:**
+6. **Evaluate JavaScript:**
+   Press `C-c w e`, enter tab ID, enter script: `document.title`
+   Result appears in the minibuffer and `*ewd-eval*` buffer
+
+7. **Exit Emacs:**
    - All tabs owned by this Emacs instance are automatically closed
    - No confirmation prompts
    - Other clients' tabs remain untouched
@@ -243,8 +257,6 @@ Check the socket path:
 
 ```bash
 ls -l $XDG_RUNTIME_DIR/webkit-bridge.sock
-# or
-ls -l /tmp/webkit-bridge.sock
 ```
 
 If the daemon uses a custom path, set `ewd-socket-path`:
@@ -283,12 +295,11 @@ You may be using an incompatible version of the daemon. Ensure you're using the 
   (push-based updates)
 ```
 
-- **Emacs client (`ewd.el`)**: Sends JSON-RPC requests, receives responses and `tabs_changed` notifications
-- **Daemon (`webkit-bridge`)**: Manages WebKitGTK instances, enforces ownership rules, broadcasts state changes
-- **Tabs**: Actual browser instances, owned by specific clients
+- **Emacs client (`ewd.el`):** Sends JSON-RPC requests, receives responses and `tabs_changed` notifications
+- **Daemon (`webkit-bridge`):** Manages WebKitGTK instances, enforces ownership rules, broadcasts state changes
+- **Tabs:** Actual browser instances, owned by specific clients
 
 ## License
-
 
 ## Contributing
 
@@ -296,7 +307,7 @@ Contributions are welcome! Please:
 
 1. Fork the repository
 2. Create a feature branch
-3. Test with Emacs 30+
+3. Test with Emacs 28.1+
 4. Submit a pull request
 
 ## Related Projects

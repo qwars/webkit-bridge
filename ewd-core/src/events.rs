@@ -9,6 +9,7 @@ pub enum DaemonEvent {
 	TabNavigated { id: Uuid, url: String },
 	TabReloaded { id: Uuid },
 	TabTitleChanged { id: Uuid, title: String },
+	TabVisibilityChanged { id: Uuid, visible: bool },
 	Shutdown,
 }
 
@@ -96,12 +97,15 @@ mod tests {
 				id: test_uuid(),
 				title: "Title".to_string(),
 			},
+			DaemonEvent::TabVisibilityChanged {
+				id: test_uuid(),
+				visible: false,
+			},
 			DaemonEvent::Shutdown,
 		];
 		for event in events {
 			let json = serde_json::to_string(&event).unwrap();
 			let deserialized: DaemonEvent = serde_json::from_str(&json).unwrap();
-			// Сравниваем через Debug, так как enum не реализует PartialEq
 			assert_eq!(format!("{:?}", event), format!("{:?}", deserialized));
 		}
 	}
@@ -111,5 +115,19 @@ mod tests {
 		let json = r#"{"unknown_variant": {}}"#;
 		let result: Result<DaemonEvent, _> = serde_json::from_str(json);
 		assert!(result.is_err(), "Unknown variant should fail to deserialize");
+	}
+	#[test]
+	fn test_tab_visibility_changed_serializes_to_snake_case() {
+		let event = DaemonEvent::TabVisibilityChanged {
+			id: test_uuid(),
+			visible: true,
+		};
+		let json = serde_json::to_string(&event).unwrap();
+		assert!(
+			json.contains("\"tab_visibility_changed\""),
+			"Expected snake_case variant name, got: {}",
+			json
+		);
+		assert!(json.contains("12345678-1234-5678-1234-567812345678"));
 	}
 }

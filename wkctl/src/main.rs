@@ -49,6 +49,16 @@ enum Commands {
 		#[arg(long, help = "JavaScript code to evaluate")]
 		script: String,
 	},
+	#[command(name = "show")]
+	Show {
+		#[arg(long, help = "Tab ID to show in a GTK window")]
+		id: String,
+	},
+	#[command(name = "hide")]
+	Hide {
+		#[arg(long, help = "Tab ID to hide (convert to headless)")]
+		id: String,
+	},
 }
 
 #[derive(serde::Serialize)]
@@ -75,13 +85,6 @@ struct JsonRpcError {
 	message: String,
 }
 
-/// Чистая функция разрешения пути сокета.
-/// Не читает окружение и не вызывает `exit` — полностью тестируема.
-///
-/// Приоритет:
-/// 1. `ewd_socket` (переменная `EWD_SOCKET_PATH`)
-/// 2. `xdg_runtime` (переменная `XDG_RUNTIME_DIR`) + `/webkit-bridge.sock`
-/// 3. `None`, если оба отсутствуют
 fn resolve_socket_path(ewd_socket: Option<&str>, xdg_runtime: Option<&str>) -> Option<String> {
 	if let Some(path) = ewd_socket
 		&& !path.is_empty()
@@ -96,8 +99,6 @@ fn resolve_socket_path(ewd_socket: Option<&str>, xdg_runtime: Option<&str>) -> O
 	None
 }
 
-/// Обёртка над `resolve_socket_path`, читающая переменные окружения.
-/// При отсутствии обоих путей печатает ошибку и завершает процесс с кодом 1.
 fn get_socket_path() -> String {
 	let ewd = env::var("EWD_SOCKET_PATH").ok();
 	let xdg = env::var("XDG_RUNTIME_DIR").ok();
@@ -135,7 +136,6 @@ fn send_request(method: &str, params: Option<serde_json::Value>) -> Result<(), B
 	let mut reader = BufReader::new(stream);
 	let mut response_str = String::new();
 
-	// Читаем строки, игнорируя notifications, пока не получим ответ на наш запрос (id: 1)
 	let response: JsonRpcResponse = loop {
 		response_str.clear();
 		let bytes = reader.read_line(&mut response_str)?;
@@ -145,14 +145,10 @@ fn send_request(method: &str, params: Option<serde_json::Value>) -> Result<(), B
 		if response_str.trim().is_empty() {
 			continue;
 		}
-		// Пробуем распарсить как ответ
-		if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(&response_str) {
-			// Проверяем, что это ответ именно на наш запрос
-			if resp.id == Some(1) {
+		if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(&response_str)
+			&& resp.id == Some(1) {
 				break resp;
 			}
-		}
-		// Если это notification или ответ с другим id, игнорируем и читаем следующую строку
 	};
 
 	if let Some(error) = response.error {
@@ -219,6 +215,8 @@ fn main() {
 		Commands::Reload { id } => send_request("reload", Some(json!({ "id": id }))),
 		Commands::List => send_request("list", None),
 		Commands::Eval { id, script } => send_request("eval", Some(json!({ "id": id, "script": script }))),
+		Commands::Show { id } => send_request("show", Some(json!({ "id": id }))),
+		Commands::Hide { id } => send_request("hide", Some(json!({ "id": id }))),
 	};
 
 	if let Err(e) = result {
@@ -230,8 +228,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	// --- Тесты для resolve_socket_path (чистые, без мутаций env) ---
 
 	#[test]
 	fn test_resolve_socket_path_ewd_has_priority() {
@@ -256,8 +252,6 @@ mod tests {
 		let path = resolve_socket_path(Some(""), Some("/run/user/1000"));
 		assert_eq!(path, Some("/run/user/1000/webkit-bridge.sock".to_string()));
 	}
-
-	// --- Тесты для format_response ---
 
 	#[test]
 	fn test_format_response_null() {

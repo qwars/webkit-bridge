@@ -8,13 +8,13 @@ A high-performance, lightweight WebKitGTK daemon for headless and visible browse
 
 ## Key Features
 
-- **Isolated tab management** with automatic cleanup of orphaned tabs
-- **Client-based access control** — each client can only manage tabs it created
-- **Proxy support** (SOCKS5, HTTP) for anonymous browsing
-- **Headless and visible modes** for flexible automation
-- **Push notifications** via `tabs_changed` JSON-RPC notifications
-- **Zero-copy Unix socket IPC** for maximum performance
-- **Graceful shutdown** via IPC command
+- Isolated tab management with automatic cleanup of orphaned tabs
+- Client-based access control — each client can only manage tabs it created
+- Proxy support (SOCKS5, HTTP) for anonymous browsing
+- **Headless and visible modes** with dynamic switching via `show`/`hide` commands
+- Push notifications via `tabs_changed` JSON-RPC notifications
+- Zero-copy Unix socket IPC for maximum performance
+- Graceful shutdown via IPC command
 
 ## Architecture
 
@@ -23,25 +23,28 @@ webkit-bridge/
 ├── ewd-core/          # Library crate (reusable API)
 ├── ewd-daemon/        # Binary crate (standalone daemon)
 ├── wkctl/             # CLI utility for testing
+├── emacs/             # Emacs client (ewd.el)
 └── bash/              # Integration tests
 ```
 
-- **`ewd-core`**: Shared library with `WebViewManager`, `Tab`, `Profile`, and event system
-- **`ewd-daemon`**: Standalone daemon with GTK main loop + Tokio async runtime
-- **`wkctl`**: CLI client for testing and scripting
-- **`bash/`**: Integration test suite
+- `ewd-core`: Shared library with `WebViewManager`, `Tab`, `Profile`, and event system
+- `ewd-daemon`: Standalone daemon with GTK main loop + Tokio async runtime
+- `wkctl`: CLI client for testing and scripting
+- `emacs/`: Emacs Lisp client for seamless integration
+- `bash/`: Integration test suite
 
 ## System Requirements
 
 ### Supported Platforms
 
-- **OS**: Linux (tested on Debian 13, should work on any modern Linux distribution)
-- **Display**: Wayland or X11
-- **GPU**: Any GPU with proper drivers (tested on AMDGPU, Intel, NVIDIA)
+- OS: Linux (tested on Debian 13, should work on any modern Linux distribution)
+- Display: Wayland or X11
+- GPU: Any GPU with proper drivers (tested on AMDGPU, Intel, NVIDIA)
 
 ### Required Dependencies
 
-**System packages (Debian/Ubuntu example):**
+System packages (Debian/Ubuntu example):
+
 ```bash
 sudo apt install \
   libwebkitgtk-6.0-dev \
@@ -52,7 +55,8 @@ sudo apt install \
   build-essential
 ```
 
-**Rust toolchain:**
+Rust toolchain:
+
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
@@ -118,6 +122,7 @@ WantedBy=default.target
 ```
 
 Enable and start:
+
 ```bash
 systemctl --user daemon-reload
 systemctl --user enable ewd-daemon
@@ -125,6 +130,7 @@ systemctl --user start ewd-daemon
 ```
 
 Check status:
+
 ```bash
 systemctl --user status ewd-daemon
 journalctl --user -u ewd-daemon -f
@@ -132,15 +138,15 @@ journalctl --user -u ewd-daemon -f
 
 ## Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `EWD_SOCKET_PATH` | Custom socket path (overrides default) |
-| `XDG_RUNTIME_DIR` | Standard XDG runtime directory (used if `EWD_SOCKET_PATH` is not set) |
-| `WEBKIT_DISABLE_COMPOSITING_MODE` | Recommended for Wayland/AMDGPU stability |
-| `WEBKIT_DISABLE_DMABUF_RENDERER` | Recommended for Wayland/AMDGPU stability |
-| `GDK_BACKEND` | Recommended: `wayland` |
+| Variable                          | Description                                                           |
+|-----------------------------------|-----------------------------------------------------------------------|
+| `EWD_SOCKET_PATH`                 | Custom socket path (overrides default)                                |
+| `XDG_RUNTIME_DIR`                 | Standard XDG runtime directory (used if `EWD_SOCKET_PATH` is not set) |
+| `WEBKIT_DISABLE_COMPOSITING_MODE` | Recommended for Wayland/AMDGPU stability                              |
+| `WEBKIT_DISABLE_DMABUF_RENDERER`  | Recommended for Wayland/AMDGPU stability                              |
+| `GDK_BACKEND`                     | Recommended: `wayland`                                                |
 
-**Default socket path priority:**
+Default socket path priority:
 1. `EWD_SOCKET_PATH` (if set)
 2. `$XDG_RUNTIME_DIR/webkit-bridge.sock`
 3. Error if neither is set
@@ -149,7 +155,7 @@ journalctl --user -u ewd-daemon -f
 
 The daemon communicates via JSON-RPC 2.0 over Unix domain sockets using Newline-Delimited JSON (NDJSON) format.
 
-**Socket path:** `$XDG_RUNTIME_DIR/webkit-bridge.sock` (default)
+Socket path: `$XDG_RUNTIME_DIR/webkit-bridge.sock` (default)
 
 ### Client Identification
 
@@ -161,7 +167,7 @@ Each connection receives a unique `client_id` (UUID). Clients can override this 
 
 Create a new browser tab.
 
-**Request:**
+Request:
 ```json
 {
   "jsonrpc": "2.0",
@@ -175,7 +181,7 @@ Create a new browser tab.
 }
 ```
 
-**Response:**
+Response:
 ```json
 {
   "jsonrpc": "2.0",
@@ -186,7 +192,7 @@ Create a new browser tab.
 }
 ```
 
-**Parameters:**
+Parameters:
 - `url` (string, optional): URL to load. Default: `"about:blank"`
 - `visible` (boolean, optional): Show GTK window. Default: `false`
 - `client_id` (string, optional): Override client UUID
@@ -195,7 +201,7 @@ Create a new browser tab.
 
 Close an existing tab. Only the owner client can close its tabs.
 
-**Request:**
+Request:
 ```json
 {
   "jsonrpc": "2.0",
@@ -208,7 +214,7 @@ Close an existing tab. Only the owner client can close its tabs.
 }
 ```
 
-**Response (success):**
+Response (success):
 ```json
 {
   "jsonrpc": "2.0",
@@ -217,7 +223,7 @@ Close an existing tab. Only the owner client can close its tabs.
 }
 ```
 
-**Response (error — not owner):**
+Response (error — not owner):
 ```json
 {
   "jsonrpc": "2.0",
@@ -233,7 +239,7 @@ Close an existing tab. Only the owner client can close its tabs.
 
 Navigate a tab to a new URL. Only the owner client can navigate its tabs.
 
-**Request:**
+Request:
 ```json
 {
   "jsonrpc": "2.0",
@@ -247,7 +253,7 @@ Navigate a tab to a new URL. Only the owner client can navigate its tabs.
 }
 ```
 
-**Response:**
+Response:
 ```json
 {
   "jsonrpc": "2.0",
@@ -260,7 +266,7 @@ Navigate a tab to a new URL. Only the owner client can navigate its tabs.
 
 Reload a tab. Only the owner client can reload its tabs.
 
-**Request:**
+Request:
 ```json
 {
   "jsonrpc": "2.0",
@@ -273,7 +279,7 @@ Reload a tab. Only the owner client can reload its tabs.
 }
 ```
 
-**Response:**
+Response:
 ```json
 {
   "jsonrpc": "2.0",
@@ -286,7 +292,7 @@ Reload a tab. Only the owner client can reload its tabs.
 
 Execute JavaScript in a tab context. Only the owner client can evaluate JS in its tabs.
 
-**Request:**
+Request:
 ```json
 {
   "jsonrpc": "2.0",
@@ -300,7 +306,7 @@ Execute JavaScript in a tab context. Only the owner client can evaluate JS in it
 }
 ```
 
-**Response:**
+Response:
 ```json
 {
   "jsonrpc": "2.0",
@@ -315,7 +321,7 @@ Execute JavaScript in a tab context. Only the owner client can evaluate JS in it
 
 List all open tabs. Available to all clients (no ownership check).
 
-**Request:**
+Request:
 ```json
 {
   "jsonrpc": "2.0",
@@ -327,39 +333,98 @@ List all open tabs. Available to all clients (no ownership check).
 }
 ```
 
-**Response:**
+Response:
 ```json
 {
-  "jsonrpc": "2.0",
-  "result": [
-    {
-      "id": "ac93f48c-9b3b-4b64-8852-966d2af207b9",
-      "url": "https://example.com",
-      "title": "Example Domain",
-      "owner": "00000000"
-    },
-    {
-      "id": "bb91aed9-1d07-46ef-87ae-f4d75689881c",
-      "url": "https://google.com",
-      "title": "Google",
-      "owner": "eff7e05a"
-    }
-  ],
-  "id": 6
-}
+   "jsonrpc": "2.0",
+   "result": [
+     {
+       "id": "ac93f48c-9b3b-4b64-8852-966d2af207b9",
+       "url": "https://example.com",
+       "title": "Example Domain",
+       "owner": "00000000",
+       "visible": false
+     },
+     {
+       "id": "bb91aed9-1d07-46ef-87ae-f4d75689881c",
+       "url": "https://google.com",
+       "title": "Google",
+       "owner": "eff7e05a",
+       "visible": true
+     }
+   ],
+   "id": 6
+ }
 ```
 
-**Fields:**
+Fields:
 - `id` (string): Tab UUID
 - `url` (string): Current URL
 - `title` (string): Page title
 - `owner` (string): Short UUID (first 8 chars) of the owner client
+- `visible` (boolean): Whether the tab is visible in a GTK window
+
+#### `show`
+
+Show a tab in a GTK window. If the tab is already visible, brings the window to focus. Only the owner client can show its tabs.
+
+Request:
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "show",
+  "params": {
+    "id": "ac93f48c-9b3b-4b64-8852-966d2af207b9",
+    "client_id": "uuid-string"
+  },
+  "id": 8
+}
+```
+
+Response:
+```json
+{
+  "jsonrpc": "2.0",
+  "result": null,
+  "id": 8
+}
+```
+
+Use case: Solve CAPTCHAs manually or interact with pages that require user input.
+
+#### `hide`
+
+Hide a tab (convert to headless). The GTK window is closed, but the tab and its WebView remain alive. Only the owner client can hide its tabs.
+
+Request:
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "hide",
+  "params": {
+    "id": "ac93f48c-9b3b-4b64-8852-966d2af207b9",
+    "client_id": "uuid-string"
+  },
+  "id": 9
+}
+```
+
+Response:
+```json
+{
+  "jsonrpc": "2.0",
+  "result": null,
+  "id": 9
+}
+```
+
+Use case: After solving a CAPTCHA, hide the window to return to headless mode.
 
 #### `shutdown`
 
 Shutdown the daemon gracefully.
 
-**Request:**
+Request:
 ```json
 {
   "jsonrpc": "2.0",
@@ -371,7 +436,7 @@ Shutdown the daemon gracefully.
 }
 ```
 
-**Response:**
+Response:
 ```json
 {
   "jsonrpc": "2.0",
@@ -384,7 +449,7 @@ Shutdown the daemon gracefully.
 
 #### `tabs_changed`
 
-Sent when any tab state changes (create, close, navigate, reload, title change). This is a **notification** (no `id` field), not a response.
+Sent when any tab state changes (create, close, navigate, reload, title change, visibility change). This is a notification (no `id` field), not a response.
 
 ```json
 {
@@ -411,8 +476,17 @@ The `wkctl` CLI utility provides a convenient way to test the daemon:
 # Create a visible tab
 wkctl create --url https://example.com --visible
 
+# Create a headless tab
+wkctl create --url https://example.com
+
 # List all tabs
 wkctl list
+
+# Show a headless tab in a GTK window
+wkctl show --id <tab-id>
+
+# Hide a visible tab (convert to headless)
+wkctl hide --id <tab-id>
 
 # Navigate to a new URL
 wkctl navigate --id <tab-id> --url https://example.org
@@ -453,6 +527,7 @@ See [bash/README.md](bash/README.md) for details.
 ### Socket Permission Denied
 
 Ensure your user has read/write access to the socket:
+
 ```bash
 ls -l $XDG_RUNTIME_DIR/webkit-bridge.sock
 ```
@@ -466,6 +541,7 @@ Set the environment variables mentioned in the "Environment Variables" section. 
 ### Daemon Won't Start — Socket Already Exists
 
 If the daemon crashed previously, the socket file may still exist. Remove it manually:
+
 ```bash
 rm $XDG_RUNTIME_DIR/webkit-bridge.sock
 ```
