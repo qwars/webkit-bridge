@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::projects::{bundle_path, entry_path, Project};
@@ -21,7 +22,6 @@ pub fn build_esbuild_command(project: &Project) -> Result<(String, Vec<String>)>
 	let args = vec![
 		entry.to_string_lossy().to_string(),
 		"--bundle".to_string(),
-		"--minify".to_string(),
 		"--color=true".to_string(),
 		format!("--outfile={}", bundle.to_string_lossy()),
 	];
@@ -29,31 +29,65 @@ pub fn build_esbuild_command(project: &Project) -> Result<(String, Vec<String>)>
 	Ok((cmd, args))
 }
 
-pub async fn run_esbuild(project: &Project) -> Result<BuildOutput> {
+/// Запускает esbuild как дочерний процесс с piped stdout/stderr
+pub async fn spawn_esbuild(project: &Project) -> Result<tokio::process::Child> {
 	let entry = entry_path(project)?;
 	let bundle = bundle_path(&project.dir)?;
 
-	let output = Command::new("esbuild")
+	let child = Command::new("esbuild")
 		.arg(entry.to_string_lossy().to_string())
 		.arg("--bundle")
-		.arg("--minify")
 		.arg("--color=true")
 		.arg(format!("--outfile={}", bundle.to_string_lossy()))
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped())
-		.output()
-		.await
-		.context("Failed to execute esbuild")?;
+		.spawn()
+		.context("Failed to spawn esbuild")?;
 
-	let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-	let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-	let success = output.status.success();
+	Ok(child)
+}
+
+/// Читает stdout/stderr дочернего процесса и ждёт его завершения
+pub async fn collect_build_output(child: &mut tokio::process::Child, bundle_path: PathBuf) -> Result<BuildOutput> {
+	let stdout = child.stdout.take().context("Failed to take stdout")?;
+	let stderr = child.stderr.take().context("Failed to take stderr")?;
+
+	let mut stdout_reader = BufReader::new(stdout);
+	let mut stderr_reader = BufReader::new(stderr);
+
+	// Читаем stdout и stderr параллельно
+	let stdout_task = tokio::spawn(async move {
+		let mut lines = String::new();
+		let mut line = String::new();
+		while stdout_reader.read_line(&mut line).await? > 0 {
+			lines.push_str(&line);
+			line.clear();
+		}
+		Ok::<String, std::io::Error>(lines)
+	});
+
+	let stderr_task = tokio::spawn(async move {
+		let mut lines = String::new();
+		let mut line = String::new();
+		while stderr_reader.read_line(&mut line).await? > 0 {
+			lines.push_str(&line);
+			line.clear();
+		}
+		Ok::<String, std::io::Error>(lines)
+	});
+
+	// Ждём завершения процесса
+	let status = child.wait().await.context("Failed to wait for esbuild")?;
+
+	// Ждём завершения чтения stdout/stderr
+	let stdout_result = stdout_task.await.context("stdout task failed")??;
+	let stderr_result = stderr_task.await.context("stderr task failed")??;
 
 	Ok(BuildOutput {
-		success,
-		stdout,
-		stderr,
-		bundle_path: bundle,
+		success: status.success(),
+		stdout: stdout_result,
+		stderr: stderr_result,
+		bundle_path,
 	})
 }
 
@@ -80,7 +114,6 @@ mod tests {
 		let (cmd, args) = build_esbuild_command(&project).unwrap();
 		assert_eq!(cmd, "esbuild");
 		assert!(args.contains(&"--bundle".to_string()));
-		assert!(args.contains(&"--minify".to_string()));
 		assert!(args.contains(&"--color=true".to_string()));
 	}
 }

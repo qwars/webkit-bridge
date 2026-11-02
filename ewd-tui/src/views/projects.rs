@@ -3,7 +3,7 @@ use ratatui::{
 	layout::Rect,
 	style::{Color, Modifier, Style},
 	text::{Line, Span},
-	widgets::{Block, Borders, List, ListItem, Paragraph},
+	widgets::{Block, Borders, List, ListItem, Padding, Paragraph},
 	Frame,
 };
 
@@ -66,7 +66,8 @@ impl View for ProjectsView {
 		let title = Block::default()
 			.borders(Borders::ALL)
 			.title(format!(" Проекты ({}) ", state.projects.len()))
-			.title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+			.title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+			.padding(Padding::uniform(1));
 
 		let inner = title.inner(area);
 		f.render_widget(title, area);

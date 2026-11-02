@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 
-use crate::build::{build_esbuild_command, run_esbuild, BuildOutput};
+use crate::build::{build_esbuild_command, collect_build_output, spawn_esbuild, BuildOutput};
 use crate::ipc::IpcClient;
 use crate::keys::Keymap;
 use crate::projects::{create_project, delete_project, get_bundle_mtime, get_sources_mtime, list_projects, Project};
@@ -41,6 +41,7 @@ pub struct ProjectState {
 	pub tab_id: Option<String>,
 	pub mtime: SystemTime,
 	pub tab_visible: bool,
+	pub last_build_success: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,6 +366,7 @@ impl Default for CreateProjectState {
 pub struct BuildResult {
 	pub dir: String,
 	pub output: Result<BuildOutput>,
+	pub build_id: u64,
 }
 
 pub struct AppState {
@@ -390,21 +392,12 @@ pub struct AppState {
 	pub pending_start: Option<String>,
 	pub build_rx: Option<mpsc::UnboundedReceiver<BuildResult>>,
 	build_tx: mpsc::UnboundedSender<BuildResult>,
+	active_builds: HashMap<String, tokio::task::JoinHandle<()>>,
+	next_build_id: u64,
+	active_build_id: HashMap<String, u64>,
 }
 
 impl AppState {
-	pub fn toggle_keymap(&mut self) -> Result<()> {
-		use crate::config::{save, GlobalConfig};
-		self.keymap = match self.keymap {
-			crate::keys::Keymap::Emacs => crate::keys::Keymap::Vim,
-			crate::keys::Keymap::Vim => crate::keys::Keymap::Vscode,
-			crate::keys::Keymap::Vscode => crate::keys::Keymap::Emacs,
-		};
-		let config = GlobalConfig { keymap: self.keymap };
-		save(&config).context("Failed to write config")?;
-		Ok(())
-	}
-
 	pub async fn new(log_rx: mpsc::UnboundedReceiver<String>) -> Result<Self> {
 		let mut projects = Vec::new();
 		for (project, mtime) in list_projects()? {
@@ -414,6 +407,7 @@ impl AppState {
 				tab_id: None,
 				mtime,
 				tab_visible: false,
+				last_build_success: None,
 			});
 		}
 
@@ -444,6 +438,9 @@ impl AppState {
 			pending_start: None,
 			build_rx: Some(build_rx),
 			build_tx,
+			active_builds: HashMap::new(),
+			next_build_id: 0,
+			active_build_id: HashMap::new(),
 		})
 	}
 
@@ -553,11 +550,23 @@ impl AppState {
 	}
 
 	/// Запускает фоновую сборку через tokio::spawn
+	/// Если есть активная сборка для этой директории — abort'ит её
 	pub fn start_build(&mut self, dir: &str) -> Result<()> {
 		let project = match self.projects.iter().find(|p| p.project.dir == dir) {
 			Some(p) => p.project.clone(),
 			None => return Ok(()),
 		};
+
+		// Abort старой сборки если есть
+		if let Some(handle) = self.active_builds.remove(dir) {
+			handle.abort();
+			log::info!("Aborted old build for '{}'", dir);
+		}
+
+		// Генерируем уникальный build_id
+		self.next_build_id += 1;
+		let build_id = self.next_build_id;
+		self.active_build_id.insert(dir.to_string(), build_id);
 
 		self.console_buffer.clear();
 		self.is_building = true;
@@ -570,15 +579,29 @@ impl AppState {
 
 		let tx = self.build_tx.clone();
 		let dir_owned = dir.to_string();
-		tokio::spawn(async move {
-			let output = run_esbuild(&project).await;
-			let _ = tx.send(BuildResult { dir: dir_owned, output });
+		let bundle_path = crate::projects::bundle_path(dir)?;
+
+		let handle = tokio::spawn(async move {
+			let output = async {
+				let mut child = spawn_esbuild(&project).await?;
+				collect_build_output(&mut child, bundle_path).await
+			}
+			.await;
+
+			let _ = tx.send(BuildResult {
+				dir: dir_owned,
+				output,
+				build_id,
+			});
 		});
+
+		self.active_builds.insert(dir.to_string(), handle);
 
 		Ok(())
 	}
 
 	/// Забирает результаты сборки из канала и обновляет Console
+	/// Игнорирует результаты устаревших сборок (build_id не совпадает с активным)
 	pub fn drain_build_results(&mut self) {
 		let rx = match self.build_rx.as_mut() {
 			Some(rx) => rx,
@@ -588,6 +611,15 @@ impl AppState {
 		loop {
 			match rx.try_recv() {
 				Ok(result) => {
+					// Проверяем, актуальна ли эта сборка
+					let is_current = self.active_build_id.get(&result.dir) == Some(&result.build_id);
+
+					if !is_current {
+						log::debug!("Ignoring stale build result for '{}'", result.dir);
+						continue;
+					}
+
+					// Актуальная сборка — обрабатываем результат
 					match result.output {
 						Ok(output) => {
 							for line in output.stdout.lines() {
@@ -604,6 +636,7 @@ impl AppState {
 
 								if let Some(project) = self.projects.iter_mut().find(|p| p.project.dir == result.dir) {
 									project.mtime = SystemTime::now();
+									project.last_build_success = Some(true);
 								}
 
 								// Если проект ожидал запуска после сборки — запускаем
@@ -619,14 +652,15 @@ impl AppState {
 										.unwrap_or(false);
 									if should_restart {
 										let dir = result.dir.clone();
-										// Перезапуск — асинхронный, планируем через spawn
-										// (в event loop будет обработано через pending_start)
 										self.pending_start = Some(dir);
 									}
 								}
 							} else {
 								self.console_buffer
 									.push_line_styled("Сборка не удалась".to_string(), Style::default().fg(Color::Red));
+								if let Some(project) = self.projects.iter_mut().find(|p| p.project.dir == result.dir) {
+									project.last_build_success = Some(false);
+								}
 								if self.pending_start.as_deref() == Some(&result.dir) {
 									self.pending_start = None;
 								}
@@ -635,12 +669,21 @@ impl AppState {
 						Err(e) => {
 							self.console_buffer
 								.push_line_styled(format!("Ошибка сборки: {}", e), Style::default().fg(Color::Red));
+							if let Some(project) = self.projects.iter_mut().find(|p| p.project.dir == result.dir) {
+								project.last_build_success = Some(false);
+							}
 							if self.pending_start.as_deref() == Some(&result.dir) {
 								self.pending_start = None;
 							}
 						}
 					}
-					self.is_building = false;
+
+					// Удаляем завершённую сборку из активных
+					self.active_build_id.remove(&result.dir);
+					self.active_builds.remove(&result.dir);
+
+					// is_building = true пока есть хотя бы одна активная сборка
+					self.is_building = !self.active_build_id.is_empty();
 				}
 				Err(mpsc::error::TryRecvError::Empty) => break,
 				Err(mpsc::error::TryRecvError::Disconnected) => break,
@@ -727,7 +770,16 @@ impl AppState {
 			return;
 		}
 		if let Some(project) = self.projects.iter().find(|p| p.project.dir == dir) {
-			let watcher = ProjectWatcher::start(project.project.clone(), self.watcher_tx.clone());
+			// Вычисляем путь к bundle файлу
+			let bundle_path = match crate::projects::bundle_path(dir) {
+				Ok(path) => path,
+				Err(e) => {
+					log::error!("Failed to get bundle path for '{}': {}", dir, e);
+					return;
+				}
+			};
+
+			let watcher = ProjectWatcher::start(project.project.clone(), self.watcher_tx.clone(), bundle_path);
 			self.active_watchers.insert(dir.to_string(), watcher);
 			log::info!("Watcher started for '{}'", dir);
 		}
@@ -951,6 +1003,7 @@ impl AppState {
 					tab_id: None,
 					mtime: SystemTime::now(),
 					tab_visible: false,
+					last_build_success: None,
 				});
 				self.projects
 					.sort_by(|a, b| a.project.config.name.cmp(&b.project.config.name));
@@ -1091,6 +1144,18 @@ impl AppState {
 	pub fn search_submit(&mut self) {
 		self.enter_project();
 	}
+
+	pub fn toggle_keymap(&mut self) -> Result<()> {
+		use crate::config::{save, GlobalConfig};
+		self.keymap = match self.keymap {
+			crate::keys::Keymap::Emacs => crate::keys::Keymap::Vim,
+			crate::keys::Keymap::Vim => crate::keys::Keymap::Vscode,
+			crate::keys::Keymap::Vscode => crate::keys::Keymap::Emacs,
+		};
+		let config = GlobalConfig { keymap: self.keymap };
+		save(&config).context("Failed to write config")?;
+		Ok(())
+	}
 }
 
 #[cfg(test)]
@@ -1113,6 +1178,7 @@ mod tests {
 			tab_id: None,
 			mtime: SystemTime::now(),
 			tab_visible: false,
+			last_build_success: None,
 		}
 	}
 
@@ -1145,6 +1211,9 @@ mod tests {
 			pending_start: None,
 			build_rx: Some(build_rx),
 			build_tx,
+			active_builds: HashMap::new(),
+			next_build_id: 0,
+			active_build_id: HashMap::new(),
 		}
 	}
 

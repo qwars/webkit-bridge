@@ -1,183 +1,246 @@
-use notify::{Event, RecursiveMode, Watcher};
+use log::{debug, warn};
+use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher as NotifyWatcher};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 
 use crate::projects::Project;
 
-const DEBOUNCE_DELAY: Duration = Duration::from_millis(200);
-
-/// Событие сборки, отправляемое watcher'ом
 #[derive(Debug, Clone)]
 pub struct BuildEvent {
 	pub dir: String,
 }
 
-/// Watcher для отслеживания изменений файлов проекта
+/// Обёртка над notify::Watcher, которая отслеживает изменения в директории проекта
+/// и отправляет BuildEvent при изменении файлов с нужными расширениями.
 pub struct ProjectWatcher {
-	_handle: JoinHandle<()>,
+	_watcher: Arc<Mutex<RecommendedWatcher>>,
 	stop_tx: mpsc::UnboundedSender<()>,
 }
 
 impl ProjectWatcher {
-	/// Запустить watcher для проекта
-	pub fn start(project: Project, event_tx: mpsc::UnboundedSender<BuildEvent>) -> Self {
-		let (stop_tx, mut stop_rx) = mpsc::unbounded_channel::<()>();
-		let (raw_tx, mut raw_rx) = mpsc::unbounded_channel::<Event>();
-
+	/// Запускает watcher для проекта.
+	/// `bundle_path` — путь к bundle файлу, изменения которого нужно игнорировать.
+	pub fn start(project: Project, event_tx: mpsc::UnboundedSender<BuildEvent>, bundle_path: PathBuf) -> Self {
 		let dir = project.dir.clone();
+		let extensions: HashSet<String> = project
+			.config
+			.watch_extensions
+			.iter()
+			.map(|e| e.to_lowercase())
+			.collect();
 
-		let watch_dir = match crate::projects::project_dir(&dir) {
-			Ok(path) => path,
+		// Канал для остановки watcher
+		let (stop_tx, mut stop_rx) = mpsc::unbounded_channel::<()>();
+
+		// Канал для событий от notify
+		let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<notify::Result<Event>>();
+
+		let config = Config::default().with_poll_interval(Duration::from_millis(500));
+
+		let watcher = Arc::new(Mutex::new(
+			RecommendedWatcher::new(
+				move |res| {
+					let _ = notify_tx.send(res);
+				},
+				config,
+			)
+			.expect("Failed to create watcher"),
+		));
+
+		// Определяем директорию проекта
+		let project_dir = match crate::projects::project_dir(&dir) {
+			Ok(d) => d,
 			Err(e) => {
-				log::error!("Failed to get project dir for watcher '{}': {}", dir, e);
+				warn!("Failed to get project dir for '{}': {}", dir, e);
 				return Self {
-					_handle: tokio::spawn(async {}),
+					_watcher: watcher,
 					stop_tx,
 				};
 			}
 		};
 
-		let extensions: HashSet<String> = project
-			.config
-			.watch_extensions
-			.iter()
-			.map(|ext| ext.trim_start_matches('.').to_ascii_lowercase())
-			.collect();
+		// Захватываем лок в отдельном блоке, чтобы guard не жил до конца if let
+		let watch_result = {
+			let mut guard = watcher.lock().unwrap();
+			guard.watch(&project_dir, RecursiveMode::Recursive)
+		};
 
-		let handle = tokio::spawn(async move {
-			let callback_extensions = extensions.clone();
-
-			let mut watcher = match notify::recommended_watcher(move |res: Result<Event, notify::Error>| match res {
-				Ok(event) => {
-					let should_build = event
-						.paths
-						.iter()
-						.any(|path| should_watch_path(path, &callback_extensions));
-
-					if should_build {
-						let _ = raw_tx.send(event);
-					}
-				}
-				Err(e) => {
-					log::warn!("Watcher error: {}", e);
-				}
-			}) {
-				Ok(watcher) => watcher,
-				Err(e) => {
-					log::error!("Failed to create watcher for '{}': {}", dir, e);
-					return;
-				}
+		if let Err(e) = watch_result {
+			warn!("Failed to watch directory {:?}: {}", project_dir, e);
+			return Self {
+				_watcher: watcher,
+				stop_tx,
 			};
+		}
 
-			if let Err(e) = watcher.watch(&watch_dir, RecursiveMode::Recursive) {
-				log::error!("Failed to watch {:?} for '{}': {}", watch_dir, dir, e);
-				return;
-			}
+		log::info!("Watcher started for project '{}' at {:?}", dir, project_dir);
 
-			log::info!("Watcher started for project '{}'", dir);
-
-			'watcher_loop: loop {
+		// Фоновая задача для обработки событий
+		tokio::spawn(async move {
+			loop {
 				tokio::select! {
 					_ = stop_rx.recv() => {
-						break 'watcher_loop;
+						log::info!("Watcher for '{}' stopped", dir);
+						break;
 					}
-
-					event = raw_rx.recv() => {
-						if event.is_none() {
-							break 'watcher_loop;
-						}
-
-						// Debounce: ждём 200ms тишины после последнего события.
-						loop {
-							tokio::select! {
-								_ = stop_rx.recv() => {
-									break 'watcher_loop;
+					Some(event_result) = notify_rx.recv() => {
+						match event_result {
+							Ok(event) => {
+								if should_trigger_build(&event, &extensions, &bundle_path) {
+									debug!("Build trigger event for '{}': {:?}", dir, event.kind);
+									let _ = event_tx.send(BuildEvent { dir: dir.clone() });
 								}
-
-								next_event = raw_rx.recv() => {
-									if next_event.is_none() {
-										break 'watcher_loop;
-									}
-									// Новое событие — сбрасываем таймер debounce.
-									continue;
-								}
-
-								_ = tokio::time::sleep(DEBOUNCE_DELAY) => {
-									log::info!("Build triggered for '{}'", dir);
-									let _ = event_tx.send(BuildEvent {
-										dir: dir.clone(),
-									});
-									break;
-								}
+							}
+							Err(e) => {
+								warn!("Watcher error for '{}': {}", dir, e);
 							}
 						}
 					}
 				}
 			}
-
-			drop(watcher);
-			log::info!("Watcher for '{}' stopped", dir);
 		});
 
 		Self {
-			_handle: handle,
+			_watcher: watcher,
 			stop_tx,
 		}
 	}
 
-	/// Остановить watcher
+	/// Останавливает watcher
 	pub fn stop(self) {
 		let _ = self.stop_tx.send(());
 	}
 }
 
-fn should_watch_path(path: &Path, extensions: &HashSet<String>) -> bool {
-	// Игнорируем системные и служебные директории
-	if path.components().any(|component| {
-		let name = component.as_os_str().to_string_lossy();
-		name == "node_modules" || name == ".git" || name == "target"
-	}) {
-		return false;
+/// Проверяет, является ли путь bundle-файлом сборки.
+/// Сравнивает как сырые пути, так и канонические (симлинки, относительные пути).
+fn is_bundle_file(path: &Path, bundle_path: &Path) -> bool {
+	if path == bundle_path {
+		return true;
+	}
+	match (path.canonicalize(), bundle_path.canonicalize()) {
+		(Ok(a), Ok(b)) => a == b,
+		_ => false,
+	}
+}
+
+/// Проверяет, нужно ли запускать сборку для данного события
+fn should_trigger_build(event: &Event, extensions: &HashSet<String>, bundle_path: &Path) -> bool {
+	use notify::EventKind;
+	match event.kind {
+		EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {}
+		_ => return false,
 	}
 
-	// Проверяем расширение файла
-	path.extension()
-		.and_then(|ext| ext.to_str())
-		.map(|ext| extensions.contains(&ext.to_ascii_lowercase()))
-		.unwrap_or(false)
+	for path in &event.paths {
+		// Игнорируем изменения bundle файла (предотвращает рекурсию сборки)
+		if is_bundle_file(path, bundle_path) {
+			debug!("Ignoring bundle file change: {:?}", path);
+			continue;
+		}
+
+		// Игнорируем node_modules и .git
+		if path
+			.components()
+			.any(|c| c.as_os_str() == "node_modules" || c.as_os_str() == ".git")
+		{
+			continue;
+		}
+
+		if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+			if extensions.contains(&ext.to_lowercase()) {
+				return true;
+			}
+		}
+	}
+
+	false
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use std::path::PathBuf;
+	use notify::event::ModifyKind;
+	use notify::EventKind;
 
-	#[test]
-	fn test_extension_filter() {
-		let extensions: HashSet<String> = ["js", "ts"].into_iter().map(String::from).collect();
+	fn make_event(paths: Vec<PathBuf>) -> Event {
+		Event {
+			kind: EventKind::Modify(ModifyKind::Any),
+			paths,
+			attrs: Default::default(),
+		}
+	}
 
-		assert!(should_watch_path(&PathBuf::from("main.js"), &extensions));
-		assert!(should_watch_path(&PathBuf::from("src/app.ts"), &extensions));
-		assert!(!should_watch_path(&PathBuf::from("style.css"), &extensions));
+	fn exts(list: &[&str]) -> HashSet<String> {
+		list.iter().map(|s| s.to_string()).collect()
 	}
 
 	#[test]
-	fn test_ignore_node_modules() {
-		let extensions: HashSet<String> = ["js"].into_iter().map(String::from).collect();
+	fn test_extension_filter() {
+		let extensions = exts(&["js", "ts"]);
+		let bundle_path = PathBuf::from("/tmp/bundle.js");
 
-		assert!(!should_watch_path(
-			&PathBuf::from("node_modules/pkg/index.js"),
-			&extensions
-		));
+		let event = make_event(vec![PathBuf::from("/project/src/main.js")]);
+		assert!(should_trigger_build(&event, &extensions, &bundle_path));
+
+		let event = make_event(vec![PathBuf::from("/project/src/app.ts")]);
+		assert!(should_trigger_build(&event, &extensions, &bundle_path));
+
+		let event = make_event(vec![PathBuf::from("/project/src/style.css")]);
+		assert!(!should_trigger_build(&event, &extensions, &bundle_path));
 	}
 
 	#[test]
 	fn test_extension_case_insensitive() {
-		let extensions: HashSet<String> = ["js"].into_iter().map(String::from).collect();
+		let extensions = exts(&["js"]);
+		let bundle_path = PathBuf::from("/tmp/bundle.js");
 
-		assert!(should_watch_path(&PathBuf::from("main.JS"), &extensions));
+		let event = make_event(vec![PathBuf::from("/project/src/main.JS")]);
+		assert!(should_trigger_build(&event, &extensions, &bundle_path));
+	}
+
+	#[test]
+	fn test_ignore_node_modules() {
+		let extensions = exts(&["js"]);
+		let bundle_path = PathBuf::from("/tmp/bundle.js");
+
+		let event = make_event(vec![PathBuf::from("/project/node_modules/lib/index.js")]);
+		assert!(!should_trigger_build(&event, &extensions, &bundle_path));
+	}
+
+	#[test]
+	fn test_ignore_bundle_file() {
+		let extensions = exts(&["js"]);
+		let bundle_path = PathBuf::from("/tmp/bundle.js");
+
+		// Изменение bundle файла должно игнорироваться
+		let event = make_event(vec![PathBuf::from("/tmp/bundle.js")]);
+		assert!(!should_trigger_build(&event, &extensions, &bundle_path));
+
+		// Изменение исходника в той же директории должно срабатывать
+		let event = make_event(vec![PathBuf::from("/tmp/hy.js")]);
+		assert!(should_trigger_build(&event, &extensions, &bundle_path));
+	}
+
+	#[test]
+	fn test_bundle_file_real_path() {
+		let dir = tempfile::TempDir::new().unwrap();
+		let bundle = dir.path().join("bundle.js");
+		let source = dir.path().join("hy.js");
+		std::fs::write(&bundle, "// bundle").unwrap();
+		std::fs::write(&source, "// source").unwrap();
+
+		let extensions = exts(&["js"]);
+
+		// Событие с каноническим путём к bundle — игнорируем
+		let event = make_event(vec![bundle.canonicalize().unwrap()]);
+		assert!(!should_trigger_build(&event, &extensions, &bundle));
+
+		// Событие с исходником — срабатывает
+		let event = make_event(vec![source.canonicalize().unwrap()]);
+		assert!(should_trigger_build(&event, &extensions, &bundle));
 	}
 }
