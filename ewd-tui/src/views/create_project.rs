@@ -7,7 +7,8 @@ use ratatui::{
 	Frame,
 };
 
-use crate::app::{AppState, CreateProjectField};
+use crate::app::AppState;
+use crate::create_project::CreateProjectField;
 use crate::keys::Action;
 use crate::views::View;
 
