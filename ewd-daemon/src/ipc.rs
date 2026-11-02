@@ -53,9 +53,11 @@ impl IpcServer {
 			manager,
 		}
 	}
+
 	pub fn subscribe(&self) -> broadcast::Receiver<DaemonEvent> {
 		self.manager.subscribe()
 	}
+
 	pub fn broadcast_event(&self, event: DaemonEvent) {
 		let _ = self.manager.event_tx().send(event);
 	}
@@ -63,6 +65,7 @@ impl IpcServer {
 	pub async fn start(&self) -> Result<()> {
 		let listener = UnixListener::bind(&self.socket_path)?;
 		info!("IPC server listening on {}", self.socket_path);
+
 		loop {
 			match listener.accept().await {
 				Ok((stream, _)) => {
@@ -96,16 +99,48 @@ impl IpcServer {
 		let mut event_rx = manager.subscribe();
 		let writer_for_events = Arc::clone(&writer);
 
+		// --- event_task сериализует все варианты DaemonEvent ---
 		let event_task = tokio::spawn(async move {
 			loop {
 				match event_rx.recv().await {
-					Ok(_) => {
-						let notification =
-							serde_json::json!({ "jsonrpc": "2.0", "method": "tabs_changed", "params": {} });
+					Ok(event) => {
+						let (method, params) = match event {
+							DaemonEvent::TabCreated { id, url } => {
+								("tab_created", serde_json::json!({"id": id.to_string(), "url": url}))
+							}
+							DaemonEvent::TabClosed { id } => ("tab_closed", serde_json::json!({"id": id.to_string()})),
+							DaemonEvent::TabNavigated { id, url } => {
+								("tab_navigated", serde_json::json!({"id": id.to_string(), "url": url}))
+							}
+							DaemonEvent::TabReloaded { id } => {
+								("tab_reloaded", serde_json::json!({"id": id.to_string()}))
+							}
+							DaemonEvent::TabTitleChanged { id, title } => (
+								"tab_title_changed",
+								serde_json::json!({"id": id.to_string(), "title": title}),
+							),
+							DaemonEvent::TabVisibilityChanged { id, visible } => (
+								"tab_visibility_changed",
+								serde_json::json!({"id": id.to_string(), "visible": visible}),
+							),
+							DaemonEvent::NetworkEvent { id, event } => (
+								"network_event",
+								serde_json::json!({"id": id.to_string(), "event": event}),
+							),
+							DaemonEvent::Shutdown => ("shutdown", serde_json::json!({})),
+						};
+
+						let notification = serde_json::json!({
+							"jsonrpc": "2.0",
+							"method": method,
+							"params": params
+						});
+
 						let notification_json = match serde_json::to_string(&notification) {
 							Ok(s) => s,
 							Err(_) => continue,
 						};
+
 						let mut w = writer_for_events.lock().await;
 						if w.write_all(notification_json.as_bytes()).await.is_err() {
 							break;
@@ -127,6 +162,7 @@ impl IpcServer {
 				}
 			}
 		});
+		// -------------------------------------------------------
 
 		loop {
 			line.clear();
@@ -138,6 +174,7 @@ impl IpcServer {
 			if line.trim().is_empty() {
 				continue;
 			}
+
 			let request: JsonRpcRequest = match serde_json::from_str::<JsonRpcRequest>(line.trim()) {
 				Ok(req) if req.jsonrpc == "2.0" => req,
 				_ => {
@@ -159,6 +196,7 @@ impl IpcServer {
 					continue;
 				}
 			};
+
 			let response = Self::process_request(request, &manager, session_client_id, owner_pid).await;
 			let response_json = serde_json::to_string(&response)?;
 			let mut w = writer.lock().await;
@@ -166,6 +204,7 @@ impl IpcServer {
 			w.write_all(b"\n").await?;
 			w.flush().await?;
 		}
+
 		event_task.abort();
 		Ok(())
 	}
@@ -192,11 +231,13 @@ impl IpcServer {
 			.and_then(|v| v.as_str())
 			.and_then(|s| Uuid::parse_str(s).ok())
 			.unwrap_or(session_client_id);
+
 		info!(
 			"Processing RPC method: {} from client {}",
 			request.method,
 			short_uuid(&effective_client_id)
 		);
+
 		let event_tx = manager.event_tx();
 
 		match request.method.as_str() {
@@ -212,6 +253,7 @@ impl IpcServer {
 					.as_ref()
 					.and_then(|p| p.get("visible").and_then(|v| v.as_bool()))
 					.unwrap_or(false);
+
 				match manager
 					.create_tab(&url, visible, "default", effective_client_id, owner_pid)
 					.await
@@ -249,6 +291,7 @@ impl IpcServer {
 						return Self::error_response(-32602, "Invalid params: invalid UUID".to_string(), request.id);
 					}
 				};
+
 				match manager.close_tab(&tab_id, effective_client_id).await {
 					Ok(()) => {
 						info!("Tab closed successfully: {}", tab_id);
@@ -284,6 +327,7 @@ impl IpcServer {
 						return Self::error_response(-32602, "Invalid params: invalid UUID".to_string(), request.id);
 					}
 				};
+
 				match manager.navigate_tab(&tab_id, &url, effective_client_id).await {
 					Ok(()) => {
 						let _ = event_tx.send(DaemonEvent::TabNavigated {
@@ -317,6 +361,7 @@ impl IpcServer {
 						return Self::error_response(-32602, "Invalid params: invalid UUID".to_string(), request.id);
 					}
 				};
+
 				match manager.reload_tab(&tab_id, effective_client_id).await {
 					Ok(()) => {
 						let _ = event_tx.send(DaemonEvent::TabReloaded { id: tab_id });
@@ -353,6 +398,7 @@ impl IpcServer {
 						return Self::error_response(-32602, "Invalid params: invalid UUID".to_string(), request.id);
 					}
 				};
+
 				match manager.eval_script(&tab_id, &script, effective_client_id).await {
 					Ok(result) => {
 						info!("Evaluated JS successfully in tab {}", tab_id);
@@ -382,6 +428,7 @@ impl IpcServer {
 						return Self::error_response(-32602, "Invalid params: invalid UUID".to_string(), request.id);
 					}
 				};
+
 				match manager.set_tab_visible(&tab_id, true, effective_client_id).await {
 					Ok(()) => {
 						info!("Tab {} shown", tab_id);
@@ -411,6 +458,7 @@ impl IpcServer {
 						return Self::error_response(-32602, "Invalid params: invalid UUID".to_string(), request.id);
 					}
 				};
+
 				match manager.set_tab_visible(&tab_id, false, effective_client_id).await {
 					Ok(()) => {
 						info!("Tab {} hidden", tab_id);
@@ -429,9 +477,18 @@ impl IpcServer {
 			}
 			"list" => {
 				let tabs = manager.list_tabs().await;
-				let tabs_json: Vec<_> = tabs.into_iter().map(|(id, url, title, owner, visible)| {
-					serde_json::json!({ "id": id.to_string(), "url": url, "title": title, "owner": short_uuid(&owner), "visible": visible })
-				}).collect();
+				let tabs_json: Vec<_> = tabs
+					.into_iter()
+					.map(|(id, url, title, owner, visible)| {
+						serde_json::json!({
+							"id": id.to_string(),
+							"url": url,
+							"title": title,
+							"owner": short_uuid(&owner),
+							"visible": visible
+						})
+					})
+					.collect();
 				info!("Listed {} tabs", tabs_json.len());
 				JsonRpcResponse {
 					jsonrpc: "2.0".to_string(),

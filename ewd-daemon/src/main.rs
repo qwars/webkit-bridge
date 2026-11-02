@@ -34,6 +34,7 @@ fn main() -> Result<()> {
 		.iter()
 		.position(|arg| arg == "--proxy")
 		.and_then(|i| args.get(i + 1).cloned());
+
 	if let Some(ref proxy) = proxy_uri {
 		info!("Using proxy: {}", proxy);
 	}
@@ -60,27 +61,43 @@ fn main() -> Result<()> {
 			.enable_all()
 			.build()
 			.expect("Failed to build Tokio runtime");
+
 		rt.block_on(async move {
 			if Path::new(&socket_path_clone).exists() {
 				warn!("Removing stale socket file at {}", socket_path_clone);
 				let _ = std::fs::remove_file(&socket_path_clone);
 			}
+
 			let server = IpcServer::new(&socket_path_clone, manager_ipc);
-			let server_handle = tokio::spawn(async move { if let Err(e) = server.start().await { warn!("Server error: {}", e); } });
+			let server_handle = tokio::spawn(async move {
+				if let Err(e) = server.start().await {
+					warn!("Server error: {}", e);
+				}
+			});
 
 			let manager_for_cleanup = Arc::clone(&manager_tokio);
 			tokio::spawn(async move {
 				let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-				loop { interval.tick().await; manager_for_cleanup.cleanup_orphans().await; }
+				loop {
+					interval.tick().await;
+					manager_for_cleanup.cleanup_orphans().await;
+				}
 			});
 
 			let mut shutdown_rx = manager_tokio.subscribe();
 			tokio::select! {
 				_ = tokio::signal::ctrl_c() => { info!("Ctrl+C received in Tokio thread"); }
-				_ = async { while let Ok(event) = shutdown_rx.recv().await { if matches!(event, DaemonEvent::Shutdown) { break; } } } => {
+				_ = async {
+					while let Ok(event) = shutdown_rx.recv().await {
+						if matches!(event, DaemonEvent::Shutdown) {
+							break;
+						}
+					}
+				} => {
 					info!("Shutdown event received via IPC in Tokio thread");
 				}
 			}
+
 			info!("Shutting down EWD daemon (Tokio cleanup)");
 			server_handle.abort();
 			if Path::new(&socket_path_clone).exists() {
@@ -95,6 +112,7 @@ fn main() -> Result<()> {
 	gtk4::glib::MainContext::default().spawn_local(async move {
 		let tabs = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::<Uuid, Tab>::new()));
 		let mut event_rx = manager.subscribe();
+
 		gtk4::glib::MainContext::default().spawn_local(async move {
 			while let Ok(event) = event_rx.recv().await {
 				if matches!(event, DaemonEvent::Shutdown) {
@@ -117,6 +135,15 @@ fn main() -> Result<()> {
 				} => {
 					let id = Uuid::new_v4();
 					let tab = Tab::new(id, &url, visible, manager.proxy_uri(), client_id, owner_pid);
+
+					// --- Подключаем мониторинг сети ---
+					let event_tx_monitor = manager.event_tx();
+					let tab_id = id;
+					tab.setup_network_monitoring(move |event| {
+						let _ = event_tx_monitor.send(DaemonEvent::NetworkEvent { id: tab_id, event });
+					});
+					// --------------------------------
+
 					if let Some(ref win) = tab.window {
 						let id_clone = id;
 						let tabs_clone = std::rc::Rc::clone(&tabs);
@@ -127,6 +154,7 @@ fn main() -> Result<()> {
 							gtk4::glib::Propagation::Proceed
 						});
 					}
+
 					let event_tx = manager.event_tx();
 					let webview = tab.webview.clone();
 					webview.connect_notify_local(Some("title"), move |wv, _| {
@@ -137,6 +165,7 @@ fn main() -> Result<()> {
 							});
 						}
 					});
+
 					let event_tx_uri = manager.event_tx();
 					let webview_uri = webview.clone();
 					webview_uri.connect_notify_local(Some("uri"), move |wv, _| {
@@ -147,6 +176,7 @@ fn main() -> Result<()> {
 							});
 						}
 					});
+
 					tabs.borrow_mut().insert(id, tab);
 					let _ = tx.send(id);
 				}
@@ -324,6 +354,7 @@ fn main() -> Result<()> {
 			}
 		}
 	});
+
 	main_loop.run();
 	Ok(())
 }
