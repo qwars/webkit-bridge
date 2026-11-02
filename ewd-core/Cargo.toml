@@ -7,17 +7,17 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-anyhow = "1.0.104"
-chrono = { version = "0.4.45", features = ["serde"] }
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
 gdk4 = "0.11"
 glib = "0.22"
 gtk4 = { version = "0.11", features = ["v4_14"] }
-parking_lot = "0.13.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-thiserror = "2.0"
-tokio = { version = "1.54", features = ["full"] }
-tracing = "0.1.44"
+parking_lot = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
 tracing-subscriber = "0.3"
-uuid = { version = "1.29", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 webkit6 = "0.6"

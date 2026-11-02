@@ -2,7 +2,8 @@
 members = [
     "ewd-core",
     "ewd-daemon",
-    "wkctl"
+    "wkctl",
+    "ewd-tui"
 ]
 resolver = "2"
 
