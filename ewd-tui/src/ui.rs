@@ -1,14 +1,14 @@
-use anyhow::Result;
-use crossterm::event::{self, Event, KeyEvent};
-use ratatui::DefaultTerminal;
-
 use crate::app::{AppState, BufferKind, Screen};
 use crate::keys::{key_to_action, Action, KeyContext};
 use crate::views::confirm_delete::ConfirmDeleteView;
 use crate::views::create_project::CreateProjectView;
+use crate::views::network_inspect::NetworkInspectView;
 use crate::views::project::{ProjectTab, ProjectView};
 use crate::views::projects::ProjectsView;
 use crate::views::View;
+use anyhow::Result;
+use crossterm::event::{self, Event, KeyEvent};
+use ratatui::DefaultTerminal;
 
 pub async fn run_ui(mut state: AppState) -> Result<()> {
 	let mut terminal = ratatui::init();
@@ -22,20 +22,21 @@ async fn run_app(terminal: &mut DefaultTerminal, state: &mut AppState) -> Result
 	let mut project_view = ProjectView::new();
 	let mut create_project_view = CreateProjectView;
 	let mut confirm_delete_view = ConfirmDeleteView;
+	let mut network_inspect_view: Option<NetworkInspectView> = None;
+	let mut previous_screen: Option<Screen> = None;
 
 	loop {
 		state.drain_logs();
+		state.drain_network_events();
 		state.drain_watcher_events().await;
 		state.drain_build_results();
 
-		// Если проект ожидает запуска и сборка завершена — запускаем
 		if let Some(dir) = state.pending_start.take() {
 			if !state.is_building {
 				if let Err(e) = state.start_project(&dir).await {
 					log::error!("Failed to start project '{}': {}", dir, e);
 				}
 			} else {
-				// Сборка ещё идёт — возвращаем pending_start
 				state.pending_start = Some(dir);
 			}
 		}
@@ -48,6 +49,7 @@ async fn run_app(terminal: &mut DefaultTerminal, state: &mut AppState) -> Result
 				&mut project_view,
 				&mut create_project_view,
 				&mut confirm_delete_view,
+				&mut network_inspect_view,
 			);
 		})?;
 
@@ -56,7 +58,6 @@ async fn run_app(terminal: &mut DefaultTerminal, state: &mut AppState) -> Result
 				if key.kind == crossterm::event::KeyEventKind::Release {
 					continue;
 				}
-
 				handle_key_event(
 					key,
 					state,
@@ -64,16 +65,16 @@ async fn run_app(terminal: &mut DefaultTerminal, state: &mut AppState) -> Result
 					&mut project_view,
 					&mut create_project_view,
 					&mut confirm_delete_view,
+					&mut network_inspect_view,
+					&mut previous_screen,
 				)
 				.await?;
-
 				if state.should_quit {
 					break;
 				}
 			}
 		}
 	}
-
 	Ok(())
 }
 
@@ -84,6 +85,7 @@ fn draw_ui(
 	project_view: &mut ProjectView,
 	create_project_view: &mut CreateProjectView,
 	confirm_delete_view: &mut ConfirmDeleteView,
+	network_inspect_view: &mut Option<NetworkInspectView>,
 ) {
 	match &state.screen {
 		Screen::Projects => {
@@ -98,6 +100,11 @@ fn draw_ui(
 		Screen::ConfirmDelete => {
 			confirm_delete_view.draw(f, state);
 		}
+		Screen::NetworkInspect(_) => {
+			if let Some(view) = network_inspect_view {
+				view.draw(f, state);
+			}
+		}
 	}
 }
 
@@ -108,6 +115,8 @@ async fn handle_key_event(
 	project_view: &mut ProjectView,
 	create_project_view: &mut CreateProjectView,
 	confirm_delete_view: &mut ConfirmDeleteView,
+	network_inspect_view: &mut Option<NetworkInspectView>,
+	previous_screen: &mut Option<Screen>,
 ) -> Result<()> {
 	let context = match &state.screen {
 		Screen::Projects => {
@@ -126,27 +135,41 @@ async fn handle_key_event(
 				state.active_buffer = BufferKind::Logs;
 				KeyContext::BufferView
 			}
+			ProjectTab::Network => {
+				state.active_buffer = BufferKind::Network;
+				if state.network_search_mode {
+					KeyContext::NetworkSearch
+				} else {
+					KeyContext::NetworkList
+				}
+			}
 			_ => KeyContext::ProjectTabs,
 		},
 		Screen::CreateProject => KeyContext::CreateProject,
 		Screen::ConfirmDelete => KeyContext::ConfirmDelete,
+		Screen::NetworkInspect(_) => KeyContext::NetworkInspect,
 	};
 
-	// Блокируем все клавиши во время сборки
+	// Блокируем все клавиши во время сборки, кроме критичных
 	if state.is_building {
-		if let Some(action) = key_to_action(key, context, state.keymap) {
+		if matches!(context, KeyContext::NetworkSearch | KeyContext::NetworkInspect) {
+			// Разрешаем поиск и Inspect во время сборки
+		} else if let Some(action) = key_to_action(key, context, state.keymap) {
 			if matches!(action, Action::ToggleTabVisibility) {
-				// Разрешаем переключение видимости даже во время сборки
 				if let Screen::Project(_) = &state.screen {
 					project_view.handle_action(action, state).await?;
 				}
 			}
 		}
-		return Ok(());
+		if state.is_building && !matches!(context, KeyContext::NetworkSearch | KeyContext::NetworkInspect) {
+			return Ok(());
+		}
 	}
 
-	let text_input = matches!(context, KeyContext::CreateProject | KeyContext::ProjectSearch);
-
+	let text_input = matches!(
+		context,
+		KeyContext::CreateProject | KeyContext::ProjectSearch | KeyContext::NetworkSearch
+	);
 	if !text_input {
 		if let Some(action) = key_to_action(key, KeyContext::Global, state.keymap) {
 			match action {
@@ -163,7 +186,43 @@ async fn handle_key_event(
 		}
 	}
 
+	// Специальная обработка для NetworkInspect
+	if let Screen::NetworkInspect(event_idx) = state.screen {
+		// Создаём view, если его нет или если индекс изменился
+		if network_inspect_view.is_none()
+			|| network_inspect_view.as_ref().map(|v| v.event_idx).unwrap_or(usize::MAX) != event_idx
+		{
+			if let Some(event) = state.network_events.get(event_idx) {
+				*network_inspect_view = Some(NetworkInspectView::new(event_idx, event));
+			}
+		}
+
+		if let Some(action) = key_to_action(key, context, state.keymap) {
+			if matches!(action, Action::CloseNetworkInspect) {
+				// Восстанавливаем предыдущий экран
+				if let Some(prev) = previous_screen.take() {
+					state.screen = prev;
+				} else {
+					state.screen = Screen::Projects;
+				}
+				*network_inspect_view = None;
+				return Ok(());
+			}
+			if let Some(view) = network_inspect_view {
+				view.handle_action(action, state).await?;
+			}
+		}
+		return Ok(());
+	}
+
+	// Обработка перехода в NetworkInspect
 	if let Some(action) = key_to_action(key, context, state.keymap) {
+		if matches!(action, Action::OpenNetworkInspect) {
+			*previous_screen = Some(state.screen.clone());
+			state.open_network_inspect();
+			return Ok(());
+		}
+
 		match &mut state.screen {
 			Screen::Projects => {
 				projects_view.handle_action(action, state).await?;
@@ -177,8 +236,8 @@ async fn handle_key_event(
 			Screen::ConfirmDelete => {
 				confirm_delete_view.handle_action(action, state).await?;
 			}
+			Screen::NetworkInspect(_) => unreachable!(),
 		}
 	}
-
 	Ok(())
 }

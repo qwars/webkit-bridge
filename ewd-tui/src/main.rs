@@ -55,26 +55,29 @@ async fn run() -> Result<()> {
 	info!("Loaded config with keymap: {:?}", global_config.keymap);
 
 	let (log_tx, log_rx) = mpsc::unbounded_channel();
+
 	let mut daemon_manager = daemon::DaemonManager::start(log_tx)
 		.await
 		.context("Не удалось запустить ewd-daemon")?;
+
 	info!("Daemon started at {:?}", daemon_manager.socket_path());
 
-	let ipc_client = match ipc::IpcClient::connect(daemon_manager.socket_path()).await {
-		Ok(client) => Arc::new(client),
+	let (ipc_client, network_rx) = match ipc::IpcClient::connect(daemon_manager.socket_path()).await {
+		Ok(res) => res,
 		Err(e) => {
 			let _ = daemon_manager.stop().await;
 			return Err(e.context("Не удалось подключиться к ewd-daemon по IPC"));
 		}
 	};
+	let ipc_client = Arc::new(ipc_client);
+
 	info!("Connected to daemon, client_id={}", ipc_client.client_id());
 
-	let mut state = app::AppState::new(log_rx)
+	let mut state = app::AppState::new(log_rx, network_rx)
 		.await
 		.context("Failed to initialize app state")?;
 
 	state.keymap = global_config.keymap;
-
 	state.set_ipc_client(ipc_client);
 
 	ui::run_ui(state).await?;
@@ -114,7 +117,7 @@ fn print_help() {
     Enter            собрать и запустить (или перезапустить)
     Esc              остановить и выйти
 
-  В Console/Logs:
+  В Console/Logs/Network:
     ↑/↓/←/→          навигация
     Shift+стрелки    выделение
     PageUp/Down      прокрутка страницами

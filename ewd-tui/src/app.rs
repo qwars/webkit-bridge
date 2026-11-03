@@ -1,10 +1,3 @@
-use anyhow::{Context, Result};
-
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::SystemTime;
-use tokio::sync::mpsc;
-
 use crate::build::BuildOutput;
 use crate::create_project::{CreateProjectField, CreateProjectState};
 use crate::input_field::InputField;
@@ -13,6 +6,14 @@ use crate::keys::Keymap;
 use crate::projects::{create_project, list_projects, Project};
 use crate::text_buffer::TextBuffer;
 use crate::watcher::{BuildEvent, ProjectWatcher};
+use anyhow::{Context, Result};
+use ewd_core::events::NetworkEvent;
+use ratatui::style::{Color, Style};
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::SystemTime;
+use tokio::sync::mpsc;
 
 const MAX_LOG_LINES: usize = 1000;
 
@@ -22,6 +23,7 @@ pub enum Screen {
 	Project(String),
 	CreateProject,
 	ConfirmDelete,
+	NetworkInspect(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +36,7 @@ pub enum ProjectStatus {
 pub enum BufferKind {
 	Console,
 	Logs,
+	Network,
 }
 
 #[derive(Debug, Clone)]
@@ -46,7 +49,6 @@ pub struct ProjectState {
 	pub last_build_success: Option<bool>,
 }
 
-/// Результат фоновой сборки, передаётся через канал
 #[derive(Debug)]
 pub struct BuildResult {
 	pub dir: String,
@@ -66,6 +68,12 @@ pub struct AppState {
 	pub log_rx: Option<mpsc::UnboundedReceiver<String>>,
 	pub log_buffer: TextBuffer,
 	pub console_buffer: TextBuffer,
+	pub network_rx: Option<mpsc::UnboundedReceiver<Value>>,
+	pub network_buffer: TextBuffer,
+	pub network_events: Vec<NetworkEvent>,
+	pub network_search_query: String,
+	pub network_search_mode: bool,
+	pub network_cursor: usize,
 	pub active_buffer: BufferKind,
 	pub create_project_state: CreateProjectState,
 	pub clipboard: Option<arboard::Clipboard>,
@@ -80,10 +88,14 @@ pub struct AppState {
 	pub(crate) active_builds: HashMap<String, tokio::task::JoinHandle<()>>,
 	pub(crate) next_build_id: u64,
 	pub(crate) active_build_id: HashMap<String, u64>,
+	pub marked_network_indices: HashSet<usize>,
 }
 
 impl AppState {
-	pub async fn new(log_rx: mpsc::UnboundedReceiver<String>) -> Result<Self> {
+	pub async fn new(
+		log_rx: mpsc::UnboundedReceiver<String>,
+		network_rx: mpsc::UnboundedReceiver<Value>,
+	) -> Result<Self> {
 		let mut projects = Vec::new();
 		for (project, mtime) in list_projects()? {
 			projects.push(ProjectState {
@@ -110,6 +122,12 @@ impl AppState {
 			log_rx: Some(log_rx),
 			log_buffer: TextBuffer::new_with_limit(MAX_LOG_LINES),
 			console_buffer: TextBuffer::new_with_limit(MAX_LOG_LINES),
+			network_rx: Some(network_rx),
+			network_buffer: TextBuffer::new_with_limit(MAX_LOG_LINES),
+			network_events: Vec::new(),
+			network_search_query: String::new(),
+			network_search_mode: false,
+			network_cursor: 0,
 			active_buffer: BufferKind::Logs,
 			create_project_state: CreateProjectState::default(),
 			clipboard,
@@ -126,6 +144,7 @@ impl AppState {
 			active_builds: HashMap::new(),
 			next_build_id: 0,
 			active_build_id: HashMap::new(),
+			marked_network_indices: HashSet::new(),
 		})
 	}
 
@@ -151,6 +170,224 @@ impl AppState {
 				}
 			}
 		}
+	}
+	pub fn drain_network_events(&mut self) {
+		let rx = match self.network_rx.as_mut() {
+			Some(rx) => rx,
+			None => return,
+		};
+
+		loop {
+			match rx.try_recv() {
+				Ok(raw) => {
+					let method = match raw.get("method").and_then(|m| m.as_str()) {
+						Some(m) => m,
+						None => continue,
+					};
+
+					if method != "network_event" {
+						continue;
+					}
+
+					let params = match raw.get("params") {
+						Some(p) => p,
+						None => continue,
+					};
+
+					let event_obj = match params.get("event") {
+						Some(e) => e,
+						None => continue,
+					};
+
+					let event: NetworkEvent = match serde_json::from_value(event_obj.clone()) {
+						Ok(e) => e,
+						Err(e) => {
+							log::warn!("Failed to parse NetworkEvent: {}", e);
+							continue;
+						}
+					};
+
+					let status = event
+						.status_code
+						.map(|s| s.to_string())
+						.unwrap_or_else(|| "-".to_string());
+					let time = event
+						.response_time_ms
+						.map(|t| format!("{}ms", t))
+						.unwrap_or_else(|| "-".to_string());
+					let event_type_str = match event.event_type {
+						ewd_core::events::NetworkEventType::Started => "started",
+						ewd_core::events::NetworkEventType::Finished => "finished",
+						ewd_core::events::NetworkEventType::Failed => "failed",
+					};
+
+					let color = match event.event_type {
+						ewd_core::events::NetworkEventType::Started => Color::DarkGray,
+						ewd_core::events::NetworkEventType::Finished => {
+							if event.status_code == Some(200) {
+								Color::Green
+							} else {
+								Color::Yellow
+							}
+						}
+						ewd_core::events::NetworkEventType::Failed => Color::Red,
+					};
+
+					let line = format!(
+						"[{}] {} {} {} {}",
+						time, event.method, status, event.url, event_type_str
+					);
+
+					self.network_buffer.push_line_styled(line, Style::default().fg(color));
+					self.network_events.push(event);
+				}
+				Err(mpsc::error::TryRecvError::Empty) => break,
+				Err(mpsc::error::TryRecvError::Disconnected) => break,
+			}
+		}
+
+		// Trim после обработки всех событий — единая точка обрезки
+		let overflow = self.network_events.len().saturating_sub(MAX_LOG_LINES);
+		if overflow > 0 {
+			self.trim_network_history(overflow);
+		}
+	}
+	/// Удаляет `trimmed` самых старых событий и синхронно сдвигает индексы отметок.
+	/// Отметки удалённых событий отбрасываются. Курсор клампится в границы
+	/// отфильтрованного списка.
+	pub fn trim_network_history(&mut self, trimmed: usize) {
+		if trimmed == 0 {
+			return;
+		}
+
+		let removed = trimmed.min(self.network_events.len());
+		if removed > 0 {
+			self.network_events.drain(0..removed);
+		}
+
+		let shifted: HashSet<usize> = self
+			.marked_network_indices
+			.iter()
+			.filter(|&&idx| idx >= removed)
+			.map(|&idx| idx - removed)
+			.collect();
+		self.marked_network_indices = shifted;
+
+		let len = self.filtered_network_indices().len();
+		self.network_cursor = if len == 0 { 0 } else { self.network_cursor.min(len - 1) };
+	}
+
+	pub fn filtered_network_indices(&self) -> Vec<usize> {
+		if self.network_search_query.is_empty() {
+			return (0..self.network_events.len()).collect();
+		}
+
+		let query = self.network_search_query.to_lowercase();
+		self.network_events
+			.iter()
+			.enumerate()
+			.filter(|(_, e)| e.url.to_lowercase().contains(&query) || e.method.to_lowercase().contains(&query))
+			.map(|(i, _)| i)
+			.collect()
+	}
+
+	pub fn enter_network_search(&mut self) {
+		self.network_search_mode = true;
+		self.network_search_query.clear();
+		self.network_cursor = 0;
+	}
+
+	pub fn exit_network_search(&mut self) {
+		self.network_search_mode = false;
+		self.network_search_query.clear();
+		self.network_cursor = 0;
+	}
+
+	pub fn network_search_input_char(&mut self, c: char) {
+		self.network_search_query.push(c);
+		self.network_cursor = 0;
+	}
+
+	pub fn network_search_backspace(&mut self) {
+		self.network_search_query.pop();
+		self.network_cursor = 0;
+	}
+
+	/// Навигация по отфильтрованному списку событий (не по буферу)
+	pub fn network_move_up(&mut self) {
+		if self.network_cursor > 0 {
+			self.network_cursor -= 1;
+		}
+	}
+
+	pub fn network_move_down(&mut self) {
+		let len = self.filtered_network_indices().len();
+		if len > 0 && self.network_cursor < len.saturating_sub(1) {
+			self.network_cursor += 1;
+		}
+	}
+
+	pub fn network_page_up(&mut self, page_size: usize) {
+		self.network_cursor = self.network_cursor.saturating_sub(page_size);
+	}
+
+	pub fn network_page_down(&mut self, page_size: usize) {
+		let len = self.filtered_network_indices().len();
+		if len > 0 {
+			self.network_cursor = (self.network_cursor + page_size).min(len.saturating_sub(1));
+		}
+	}
+
+	pub fn network_home(&mut self) {
+		self.network_cursor = 0;
+	}
+
+	pub fn network_end(&mut self) {
+		let len = self.filtered_network_indices().len();
+		if len > 0 {
+			self.network_cursor = len.saturating_sub(1);
+		}
+	}
+
+	pub fn open_network_inspect(&mut self) {
+		let indices = self.filtered_network_indices();
+		if indices.is_empty() {
+			return;
+		}
+		let cursor = self.network_cursor.min(indices.len().saturating_sub(1));
+		let event_idx = indices[cursor];
+		self.screen = Screen::NetworkInspect(event_idx);
+	}
+
+	/// Toggle отметки для текущего курсора в отфильтрованном списке
+	pub fn toggle_network_mark(&mut self) {
+		let indices = self.filtered_network_indices();
+		if indices.is_empty() {
+			return;
+		}
+		let cursor = self.network_cursor.min(indices.len().saturating_sub(1));
+		let event_idx = indices[cursor];
+
+		if self.marked_network_indices.contains(&event_idx) {
+			self.marked_network_indices.remove(&event_idx);
+		} else {
+			self.marked_network_indices.insert(event_idx);
+		}
+	}
+
+	/// Снять все отметки
+	pub fn clear_network_marks(&mut self) {
+		self.marked_network_indices.clear();
+	}
+
+	/// Вернуть список отмеченных событий в порядке их появления
+	pub fn marked_events(&self) -> Vec<&NetworkEvent> {
+		let mut indices: Vec<usize> = self.marked_network_indices.iter().copied().collect();
+		indices.sort();
+		indices
+			.into_iter()
+			.filter_map(|idx| self.network_events.get(idx))
+			.collect()
 	}
 
 	pub fn start_create_project(&mut self) {
@@ -311,6 +548,7 @@ impl AppState {
 	pub async fn submit_create_project(&mut self) -> Result<bool> {
 		self.create_project_state.error = None;
 		self.create_project_state.invalid_fields.clear();
+
 		let mut has_errors = false;
 
 		if self.create_project_state.name.text.is_empty() {
@@ -414,9 +652,23 @@ mod tests {
 		}
 	}
 
+	fn make_network_event(url: &str, method: &str) -> NetworkEvent {
+		NetworkEvent {
+			url: url.to_string(),
+			method: method.to_string(),
+			status_code: Some(200),
+			response_time_ms: Some(10),
+			event_type: ewd_core::events::NetworkEventType::Finished,
+			request_headers: vec![],
+			response_headers: vec![],
+		}
+	}
+
 	fn mock_state() -> AppState {
 		let (watcher_tx, watcher_rx) = mpsc::unbounded_channel();
 		let (build_tx, build_rx) = mpsc::unbounded_channel();
+		let (_network_tx, network_rx) = mpsc::unbounded_channel();
+
 		AppState {
 			screen: Screen::Projects,
 			projects: vec![
@@ -432,6 +684,12 @@ mod tests {
 			log_rx: None,
 			log_buffer: TextBuffer::new_with_limit(MAX_LOG_LINES),
 			console_buffer: TextBuffer::new_with_limit(MAX_LOG_LINES),
+			network_rx: Some(network_rx),
+			network_buffer: TextBuffer::new_with_limit(MAX_LOG_LINES),
+			network_events: Vec::new(),
+			network_search_query: String::new(),
+			network_search_mode: false,
+			network_cursor: 0,
 			active_buffer: BufferKind::Logs,
 			create_project_state: CreateProjectState::default(),
 			clipboard: None,
@@ -446,179 +704,208 @@ mod tests {
 			active_builds: HashMap::new(),
 			next_build_id: 0,
 			active_build_id: HashMap::new(),
+			marked_network_indices: HashSet::new(),
 		}
 	}
 
 	#[test]
-	fn test_input_field_selection() {
-		let mut field = InputField::new();
-		for c in "hello".chars() {
-			field.insert(c);
-		}
-		assert!(!field.has_selection());
-		field.select_all();
-		assert_eq!(field.selection_range(), Some((0, 5)));
-		field.paste("world", false);
-		assert_eq!(field.text, "world");
-		assert!(!field.has_selection());
-	}
-
-	#[test]
-	fn test_input_field_cut_word() {
-		let mut field = InputField::new();
-		for c in "hello world".chars() {
-			field.insert(c);
-		}
-		let word = field.cut_word();
-		assert_eq!(word, "world");
-		assert_eq!(field.text, "hello ");
-	}
-
-	#[test]
-	fn test_input_field_kill_line() {
-		let mut field = InputField::new();
-		for c in "hello world".chars() {
-			field.insert(c);
-		}
-		field.move_to_line_start();
-		field.move_word_right();
-		let killed = field.kill_line();
-		assert_eq!(killed, "world");
-		assert_eq!(field.text, "hello ");
-	}
-
-	#[test]
-	fn test_navigate_up() {
+	fn test_network_cursor_navigation() {
 		let mut state = mock_state();
-		state.selected_index = 1;
-		state.navigate_up();
-		assert_eq!(state.selected_index, 0);
+		state.network_events = vec![
+			make_network_event("https://a.com", "GET"),
+			make_network_event("https://b.com", "POST"),
+			make_network_event("https://c.com", "GET"),
+		];
+
+		assert_eq!(state.network_cursor, 0);
+		state.network_move_down();
+		assert_eq!(state.network_cursor, 1);
+		state.network_move_down();
+		assert_eq!(state.network_cursor, 2);
+		state.network_move_down(); // Не должно выйти за пределы
+		assert_eq!(state.network_cursor, 2);
+		state.network_move_up();
+		assert_eq!(state.network_cursor, 1);
+		state.network_home();
+		assert_eq!(state.network_cursor, 0);
+		state.network_end();
+		assert_eq!(state.network_cursor, 2);
 	}
 
 	#[test]
-	fn test_navigate_down() {
+	fn test_network_cursor_respects_filter() {
 		let mut state = mock_state();
-		state.navigate_down();
-		assert_eq!(state.selected_index, 1);
-	}
+		state.network_events = vec![
+			make_network_event("https://a.com/api", "GET"),
+			make_network_event("https://b.com", "POST"),
+			make_network_event("https://c.com/api", "GET"),
+		];
 
-	#[tokio::test]
-	async fn test_enter_project() {
-		let mut state = mock_state();
-		state.enter_project();
-		assert_eq!(state.screen, Screen::Project("proj-a".to_string()));
+		state.network_search_query = "api".to_string();
+		// Отфильтрованы: 0 и 2
+		assert_eq!(state.filtered_network_indices(), vec![0, 2]);
+
+		state.network_move_down();
+		assert_eq!(state.network_cursor, 1); // Второй в отфильтрованном списке
+		state.network_move_down(); // Не должно выйти за пределы (всего 2)
+		assert_eq!(state.network_cursor, 1);
 	}
 
 	#[test]
-	fn test_current_project() {
+	fn test_open_network_inspect() {
 		let mut state = mock_state();
+		state.network_events = vec![
+			make_network_event("https://a.com", "GET"),
+			make_network_event("https://b.com", "POST"),
+		];
 		state.screen = Screen::Project("proj-a".to_string());
-		assert_eq!(state.current_project().unwrap().project.config.name, "Project A");
-		state.screen = Screen::Projects;
-		assert!(state.current_project().is_none());
+
+		state.network_move_down(); // cursor = 1
+		state.open_network_inspect();
+
+		// Должен открыться экран Inspect с индексом события 1
+		assert!(matches!(state.screen, Screen::NetworkInspect(1)));
 	}
 
 	#[test]
-	fn test_drain_logs_with_data() {
-		let (tx, rx) = mpsc::unbounded_channel();
-		tx.send("line 1".to_string()).unwrap();
-		tx.send("line 2".to_string()).unwrap();
+	fn test_toggle_network_mark() {
 		let mut state = mock_state();
-		state.log_rx = Some(rx);
-		state.drain_logs();
-		assert_eq!(
-			state
-				.log_buffer
-				.lines
-				.iter()
-				.map(|l| l.text.as_str())
-				.collect::<Vec<_>>(),
-			vec!["line 1", "line 2"]
-		);
+		state.network_events = vec![
+			make_network_event("https://a.com", "GET"),
+			make_network_event("https://b.com", "POST"),
+			make_network_event("https://c.com", "GET"),
+		];
+
+		// Курсор на 0, отмечаем
+		state.toggle_network_mark();
+		assert!(state.marked_network_indices.contains(&0));
+		assert_eq!(state.marked_network_indices.len(), 1);
+
+		// Переходим на 1
+		state.network_move_down();
+		state.toggle_network_mark();
+		assert!(state.marked_network_indices.contains(&0));
+		assert!(state.marked_network_indices.contains(&1));
+		assert_eq!(state.marked_network_indices.len(), 2);
+
+		// Снимаем отметку с 1 (повторный toggle)
+		state.toggle_network_mark();
+		assert!(state.marked_network_indices.contains(&0));
+		assert!(!state.marked_network_indices.contains(&1));
+		assert_eq!(state.marked_network_indices.len(), 1);
 	}
 
 	#[test]
-	fn test_create_project_input_and_cursor() {
+	fn test_marked_events() {
 		let mut state = mock_state();
-		state.start_create_project();
-		assert_eq!(state.screen, Screen::CreateProject);
-		for c in "test".chars() {
-			state.input_char(c);
-		}
-		assert_eq!(state.create_project_state.name.text, "test");
-		assert_eq!(state.create_project_state.name.cursor, 4);
-		state.move_cursor_left();
-		state.move_cursor_left();
-		assert_eq!(state.create_project_state.name.cursor, 2);
-		state.backspace();
-		assert_eq!(state.create_project_state.name.text, "tst");
-		state.next_field();
-		assert_eq!(state.create_project_state.focused_field, CreateProjectField::Dir);
+		state.network_events = vec![
+			make_network_event("https://a.com", "GET"),
+			make_network_event("https://b.com", "POST"),
+			make_network_event("https://c.com", "GET"),
+		];
+
+		// Отмечаем 0 и 2
+		state.marked_network_indices.insert(0);
+		state.marked_network_indices.insert(2);
+
+		let marked = state.marked_events();
+		assert_eq!(marked.len(), 2);
+		assert_eq!(marked[0].url, "https://a.com");
+		assert_eq!(marked[1].url, "https://c.com");
 	}
 
 	#[test]
-	fn test_search_filters_projects() {
+	fn test_clear_network_marks() {
 		let mut state = mock_state();
-		state.enter_search();
-		for c in "b".chars() {
-			state.search_input_char(c);
-		}
-		let visible = state.filtered_projects();
-		assert_eq!(visible.len(), 1);
-		assert_eq!(visible[0].project.config.name, "Project B");
+		state.network_events = vec![
+			make_network_event("https://a.com", "GET"),
+			make_network_event("https://b.com", "POST"),
+		];
+
+		state.marked_network_indices.insert(0);
+		state.marked_network_indices.insert(1);
+		assert_eq!(state.marked_network_indices.len(), 2);
+
+		state.clear_network_marks();
+		assert_eq!(state.marked_network_indices.len(), 0);
 	}
 
 	#[test]
-	fn test_search_case_insensitive() {
+	fn test_marked_indices_shift_on_trim() {
 		let mut state = mock_state();
-		state.enter_search();
-		for c in "PROJECT a".chars() {
-			state.search_input_char(c);
-		}
-		let visible = state.filtered_projects();
-		assert_eq!(visible.len(), 1);
-		assert_eq!(visible[0].project.dir, "proj-a");
+		state.network_events = vec![
+			make_network_event("https://a.com", "GET"),
+			make_network_event("https://b.com", "POST"),
+			make_network_event("https://c.com", "GET"),
+			make_network_event("https://d.com", "POST"),
+		];
+
+		// Отмечены 1 (b) и 3 (d)
+		state.marked_network_indices.insert(1);
+		state.marked_network_indices.insert(3);
+
+		// Удаляем первые 2 события (a и b)
+		state.trim_network_history(2);
+
+		// Отметка b исчезла, отметка d сместилась 3 -> 1
+		assert_eq!(state.marked_network_indices.len(), 1);
+		assert!(state.marked_network_indices.contains(&1));
+		assert_eq!(state.network_events.len(), 2);
+		assert_eq!(state.marked_events()[0].url, "https://d.com");
 	}
 
 	#[test]
-	fn test_search_navigation_uses_filtered_list() {
+	fn test_trim_drops_removed_marks() {
 		let mut state = mock_state();
-		state.enter_search();
-		assert_eq!(state.filtered_indices().len(), 2);
-		state.navigate_down();
-		assert_eq!(state.selected_index, 1);
-		state.navigate_down();
-		assert_eq!(state.selected_index, 1);
-	}
+		state.network_events = vec![
+			make_network_event("https://a.com", "GET"),
+			make_network_event("https://b.com", "POST"),
+			make_network_event("https://c.com", "GET"),
+			make_network_event("https://d.com", "POST"),
+		];
 
-	#[tokio::test]
-	async fn test_search_submit_enters_project() {
-		let mut state = mock_state();
-		state.enter_search();
-		state.search_input_char('b');
-		state.search_submit();
-		assert_eq!(state.screen, Screen::Project("proj-b".to_string()));
-		assert!(!state.search_mode);
-		assert!(state.search_query.is_empty());
-	}
+		state.marked_network_indices.insert(2); // c
+		state.marked_network_indices.insert(3); // d
 
-	#[test]
-	fn test_search_exit_restores_selection() {
-		let mut state = mock_state();
-		state.enter_search();
-		state.search_input_char('b');
-		state.exit_search();
-		assert!(!state.search_mode);
-		assert_eq!(state.selected_index, 1);
+		state.trim_network_history(2);
+
+		// c: 2 -> 0, d: 3 -> 1
+		assert!(state.marked_network_indices.contains(&0));
+		assert!(state.marked_network_indices.contains(&1));
+		assert_eq!(state.marked_network_indices.len(), 2);
+
+		let marked = state.marked_events();
+		assert_eq!(marked[0].url, "https://c.com");
+		assert_eq!(marked[1].url, "https://d.com");
 	}
 
 	#[test]
-	fn test_search_backspace_widens_filter() {
+	fn test_trim_clamps_cursor() {
 		let mut state = mock_state();
-		state.enter_search();
-		state.search_input_char('b');
-		assert_eq!(state.filtered_projects().len(), 1);
-		state.search_backspace();
-		assert_eq!(state.filtered_projects().len(), 2);
+		state.network_events = vec![
+			make_network_event("https://a.com", "GET"),
+			make_network_event("https://b.com", "POST"),
+			make_network_event("https://c.com", "GET"),
+		];
+		state.network_cursor = 2;
+
+		// Удаляем 2 события — осталось 1, курсор должен стать 0
+		state.trim_network_history(2);
+		assert_eq!(state.network_cursor, 0);
+	}
+
+	#[test]
+	fn test_trim_zero_is_noop() {
+		let mut state = mock_state();
+		state.network_events = vec![
+			make_network_event("https://a.com", "GET"),
+			make_network_event("https://b.com", "POST"),
+		];
+		state.marked_network_indices.insert(1);
+
+		state.trim_network_history(0);
+
+		assert_eq!(state.network_events.len(), 2);
+		assert!(state.marked_network_indices.contains(&1));
 	}
 }

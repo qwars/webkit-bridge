@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use uuid::Uuid;
 
 #[derive(Debug, Serialize)]
@@ -52,7 +52,7 @@ pub struct IpcClient {
 }
 
 impl IpcClient {
-	pub async fn connect<P: AsRef<Path>>(socket_path: P) -> Result<Self> {
+	pub async fn connect<P: AsRef<Path>>(socket_path: P) -> Result<(Self, mpsc::UnboundedReceiver<Value>)> {
 		let stream = UnixStream::connect(socket_path.as_ref())
 			.await
 			.with_context(|| format!("Failed to connect to {:?}", socket_path.as_ref()))?;
@@ -65,22 +65,28 @@ impl IpcClient {
 			Arc::new(Mutex::new(std::collections::HashMap::new()));
 		let pending_clone = pending.clone();
 
+		let (notification_tx, notification_rx) = mpsc::unbounded_channel::<Value>();
+
 		let reader_handle = tokio::spawn(async move {
-			Self::reader_loop(reader, pending_clone).await;
+			Self::reader_loop(reader, pending_clone, notification_tx).await;
 		});
 
-		Ok(Self {
-			client_id,
-			next_id: AtomicU64::new(1),
-			pending,
-			_reader_handle: reader_handle,
-			writer: Arc::new(Mutex::new(writer)),
-		})
+		Ok((
+			Self {
+				client_id,
+				next_id: AtomicU64::new(1),
+				pending,
+				_reader_handle: reader_handle,
+				writer: Arc::new(Mutex::new(writer)),
+			},
+			notification_rx,
+		))
 	}
 
 	async fn reader_loop(
 		reader: tokio::io::ReadHalf<UnixStream>,
 		pending: Arc<Mutex<std::collections::HashMap<u64, PendingRequest>>>,
+		notification_tx: mpsc::UnboundedSender<Value>,
 	) {
 		let buf_reader = BufReader::new(reader);
 		let mut lines = buf_reader.lines();
@@ -112,6 +118,11 @@ impl IpcClient {
 						}
 					}
 					Err(e) => warn!("Failed to parse response: {} (line: {})", e, line),
+				}
+			} else if let Some(method) = raw.get("method").and_then(|m| m.as_str()) {
+				// Пересылаем уведомления в основной поток
+				if method == "network_event" || method == "tabs_changed" {
+					let _ = notification_tx.send(raw);
 				}
 			}
 		}

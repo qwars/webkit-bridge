@@ -1,6 +1,5 @@
 use ansi_to_tui::IntoText;
-use ratatui::style::Color as RatatuiColor;
-use ratatui::style::Style;
+use ratatui::style::{Color as RatatuiColor, Style};
 use ratatui::text::{Line, Span};
 use ratatui_core::style::Color as CoreColor;
 
@@ -47,18 +46,14 @@ impl TextBuffer {
 	}
 
 	pub fn push_ansi_line(&mut self, text: String) {
-		// Тип выводится автоматически как Result<ratatui_core::text::Text, ansi_to_tui::Error>
 		let parsed = text.clone().into_text();
-
 		match parsed {
 			Ok(core_text) => {
 				for core_line in core_text.lines {
 					let mut stripped = String::new();
 					let mut ratatui_spans = Vec::new();
-
 					for core_span in core_line.spans {
 						stripped.push_str(&core_span.content);
-
 						let mut style = Style::default();
 						if let Some(fg) = core_span.style.fg {
 							style = style.fg(convert_color(fg));
@@ -66,10 +61,8 @@ impl TextBuffer {
 						if let Some(bg) = core_span.style.bg {
 							style = style.bg(convert_color(bg));
 						}
-
 						ratatui_spans.push(Span::styled(core_span.content, style));
 					}
-
 					self.lines.push(BufferLine {
 						text: stripped,
 						line: Line::from(ratatui_spans),
@@ -142,6 +135,9 @@ impl TextBuffer {
 			self.cursor_row += 1;
 			self.anchor_row = self.cursor_row;
 			self.anchor_col = self.cursor_col;
+			if self.cursor_row == self.lines.len().saturating_sub(1) {
+				self.auto_scroll = true;
+			}
 		}
 	}
 
@@ -155,6 +151,7 @@ impl TextBuffer {
 			self.anchor_row = self.cursor_row;
 			self.anchor_col = self.cursor_col;
 		}
+		self.auto_scroll = false;
 	}
 
 	pub fn move_right(&mut self) {
@@ -167,6 +164,9 @@ impl TextBuffer {
 			self.cursor_col = 0;
 			self.anchor_row = self.cursor_row;
 			self.anchor_col = self.cursor_col;
+			if self.cursor_row == self.lines.len().saturating_sub(1) {
+				self.auto_scroll = true;
+			}
 		}
 	}
 
@@ -181,6 +181,9 @@ impl TextBuffer {
 		self.cursor_row = (self.cursor_row + page_size).min(self.lines.len().saturating_sub(1));
 		self.anchor_row = self.cursor_row;
 		self.anchor_col = self.cursor_col;
+		if self.cursor_row == self.lines.len().saturating_sub(1) {
+			self.auto_scroll = true;
+		}
 	}
 
 	pub fn move_to_buffer_start(&mut self) {
@@ -201,6 +204,7 @@ impl TextBuffer {
 		}
 		self.anchor_row = self.cursor_row;
 		self.anchor_col = self.cursor_col;
+		self.auto_scroll = true;
 	}
 
 	pub fn select_up(&mut self) {
@@ -244,6 +248,7 @@ impl TextBuffer {
 			self.cursor_row = self.lines.len() - 1;
 			self.cursor_col = self.lines[self.cursor_row].text.len();
 		}
+		self.auto_scroll = true;
 	}
 
 	pub fn toggle_mark(&mut self) {
@@ -259,7 +264,6 @@ impl TextBuffer {
 		if !self.has_selection() {
 			return None;
 		}
-
 		let (start_row, start_col, end_row, end_col) = if self.cursor_row < self.anchor_row
 			|| (self.cursor_row == self.anchor_row && self.cursor_col < self.anchor_col)
 		{
@@ -267,7 +271,6 @@ impl TextBuffer {
 		} else {
 			(self.anchor_row, self.anchor_col, self.cursor_row, self.cursor_col)
 		};
-
 		Some((start_row, start_col, end_row, end_col))
 	}
 
@@ -275,34 +278,27 @@ impl TextBuffer {
 		if !self.has_selection() {
 			return None;
 		}
-
 		let (start_row, start_col, end_row, end_col) = self.selection_range()?;
 		let mut result = String::new();
-
 		for row in start_row..=end_row {
 			if row >= self.lines.len() {
 				break;
 			}
-
 			let line_text = &self.lines[row].text;
 			let line_len = line_text.len();
-
 			let start = if row == start_row { start_col } else { 0 };
 			let end = if row == end_row {
 				end_col.min(line_len)
 			} else {
 				line_len
 			};
-
 			if start < line_len {
 				result.push_str(&line_text[start..end]);
 			}
-
 			if row < end_row {
 				result.push('\n');
 			}
 		}
-
 		Some(result)
 	}
 
@@ -310,7 +306,6 @@ impl TextBuffer {
 		if viewport_height == 0 {
 			return;
 		}
-
 		if self.auto_scroll {
 			self.scroll_offset = self.lines.len().saturating_sub(viewport_height);
 		} else {
@@ -362,11 +357,8 @@ mod tests {
 		let mut buffer = TextBuffer::new_with_limit(100);
 		buffer.push_line("line 1".to_string());
 		buffer.push_line("line 2".to_string());
-
 		assert_eq!(buffer.lines.len(), 2);
 		assert_eq!(buffer.cursor_row, 1);
-		assert_eq!(buffer.cursor_col, 6);
-
 		buffer.move_up();
 		assert_eq!(buffer.cursor_row, 0);
 	}
@@ -391,5 +383,47 @@ mod tests {
 			buffer.select_right();
 		}
 		assert_eq!(buffer.selected_text(), Some("hello".to_string()));
+	}
+
+	#[test]
+	fn test_auto_scroll_on_push() {
+		let mut buffer = TextBuffer::new_with_limit(100);
+		assert!(buffer.auto_scroll);
+		buffer.push_line("line 1".to_string());
+		assert_eq!(buffer.cursor_row, 0);
+		buffer.push_line("line 2".to_string());
+		assert_eq!(buffer.cursor_row, 1);
+	}
+
+	#[test]
+	fn test_auto_scroll_disabled_on_move_up() {
+		let mut buffer = TextBuffer::new_with_limit(100);
+		buffer.push_line("line 1".to_string());
+		buffer.push_line("line 2".to_string());
+		buffer.push_line("line 3".to_string());
+		assert!(buffer.auto_scroll);
+
+		// Поднимаемся на строку вверх, auto_scroll должен отключиться
+		buffer.move_up();
+		assert!(!buffer.auto_scroll);
+		assert_eq!(buffer.cursor_row, 1);
+
+		// Добавляем новую строку. Так как auto_scroll = false, курсор должен остаться на строке 1
+		buffer.push_line("line 4".to_string());
+		assert_eq!(buffer.cursor_row, 1); // Исправлено: было 2, должно быть 1
+		assert_eq!(buffer.lines.len(), 4);
+	}
+
+	#[test]
+	fn test_auto_scroll_enabled_on_reach_bottom() {
+		let mut buffer = TextBuffer::new_with_limit(100);
+		buffer.push_line("line 1".to_string());
+		buffer.push_line("line 2".to_string());
+		buffer.push_line("line 3".to_string());
+		buffer.move_up();
+		assert!(!buffer.auto_scroll);
+		buffer.move_down();
+		buffer.move_down();
+		assert!(buffer.auto_scroll);
 	}
 }

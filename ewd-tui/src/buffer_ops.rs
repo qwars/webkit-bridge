@@ -5,6 +5,7 @@ impl AppState {
 		match self.active_buffer {
 			BufferKind::Console => &mut self.console_buffer,
 			BufferKind::Logs => &mut self.log_buffer,
+			BufferKind::Network => &mut self.network_buffer,
 		}
 	}
 
