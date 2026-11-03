@@ -71,12 +71,10 @@ impl View for CreateProjectView {
 				let selection = field.selection_range();
 
 				for (idx, &c) in chars.iter().enumerate() {
-					let is_selected = selection.map_or(false, |(start, end)| idx >= start && idx < end);
+					let is_selected = selection.is_some_and(|(start, end)| idx >= start && idx < end);
 					let is_cursor = idx == field.cursor;
 
-					let style = if is_selected {
-						Style::default().add_modifier(Modifier::REVERSED)
-					} else if is_cursor && !field.has_selection() {
+					let style = if is_selected || (is_cursor && !field.has_selection()) {
 						Style::default().add_modifier(Modifier::REVERSED)
 					} else {
 						Style::default()

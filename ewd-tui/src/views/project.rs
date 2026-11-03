@@ -22,11 +22,11 @@ pub enum ProjectTab {
 impl ProjectTab {
 	fn as_str(&self) -> &'static str {
 		match self {
-			ProjectTab::Console => "Console  ",
-			ProjectTab::Network => "Network  ",
-			ProjectTab::Resources => "Resources  ",
-			ProjectTab::Dom => "DOM  ",
-			ProjectTab::Logs => "Logs  ",
+			ProjectTab::Console => "Console   ",
+			ProjectTab::Network => "Network   ",
+			ProjectTab::Resources => "Resources   ",
+			ProjectTab::Dom => "DOM   ",
+			ProjectTab::Logs => "Logs   ",
 		}
 	}
 
@@ -54,6 +54,16 @@ impl ProjectView {
 
 	pub fn active_tab(&self) -> ProjectTab {
 		self.active_tab
+	}
+
+	fn format_bytes(bytes: u64) -> String {
+		if bytes >= 1_000_000 {
+			format!("{:.1}Mb", bytes as f64 / 1_000_000.0)
+		} else if bytes >= 1_000 {
+			format!("{:.1}Kb", bytes as f64 / 1_000.0)
+		} else {
+			format!("{}b", bytes)
+		}
 	}
 
 	fn draw_text_buffer(&self, f: &mut Frame, area: Rect, state: &AppState) {
@@ -91,7 +101,7 @@ impl ProjectView {
 				for span in &buffer_line.line.spans {
 					for ch in span.content.chars() {
 						let is_cursor = row == buffer_clone.cursor_row && current_col == buffer_clone.cursor_col;
-						let is_selected = selection.map_or(false, |(sr, sc, er, ec)| {
+						let is_selected = selection.is_some_and(|(sr, sc, er, ec)| {
 							if row == sr && row == er {
 								current_col >= sc && current_col < ec
 							} else if row == sr {
@@ -128,8 +138,8 @@ impl ProjectView {
 	}
 
 	fn draw_network_buffer(&self, f: &mut Frame, area: Rect, state: &AppState) {
-		let filtered_indices = state.filtered_network_indices();
-		if filtered_indices.is_empty() {
+		let visible_indices = state.visible_network_indices();
+		if visible_indices.is_empty() {
 			let msg = if state.network_events.is_empty() {
 				"Пусто"
 			} else {
@@ -141,9 +151,8 @@ impl ProjectView {
 		}
 
 		let area_height = area.height as usize;
-		let cursor = state.network_cursor.min(filtered_indices.len().saturating_sub(1));
+		let cursor = state.network_cursor.min(visible_indices.len().saturating_sub(1));
 
-		// Автоматическая прокрутка: курсор всегда виден
 		let scroll_offset = if cursor < state.network_buffer.scroll_offset {
 			cursor
 		} else if cursor >= state.network_buffer.scroll_offset + area_height {
@@ -153,14 +162,13 @@ impl ProjectView {
 		};
 
 		let start = scroll_offset;
-		let end = (start + area_height).min(filtered_indices.len());
+		let end = (start + area_height).min(visible_indices.len());
 		let mut visible_lines = Vec::new();
 
-		// Резервируем ~35 символов для отметки, пробелов и мета-информации [ METHOD STATUS ] [TIME]
-		let max_url_len = (area.width as usize).saturating_sub(35);
+		let mark_len = 2;
 
-		for i in start..end {
-			let event_idx = filtered_indices[i];
+		for (i, &_event_idx) in visible_indices.iter().enumerate().skip(start).take(end - start) {
+			let event_idx = visible_indices[i];
 			let event = &state.network_events[event_idx];
 
 			let method_upper = event.method.to_uppercase();
@@ -172,17 +180,47 @@ impl ProjectView {
 				.response_time_ms
 				.map(|t| format!("{}ms", t))
 				.unwrap_or_else(|| "-".to_string());
+			let size_str = event
+				.response_size_bytes
+				.map(Self::format_bytes)
+				.unwrap_or_else(|| "-".to_string());
 
-			// Цветовая схема
+			let left_part = format!("[ {} {} ] - ", method_upper, status_str);
+			let right_part = format!("[{}] [{}]", time_str, size_str);
+
+			let left_len = left_part.len();
+			let right_len = right_part.len();
+
+			let min_required_width = mark_len + left_len + right_len + 1;
+			let available_for_url = (area.width as usize).saturating_sub(min_required_width);
+
+			let display_url = if event.url.len() > available_for_url {
+				if available_for_url > 3 {
+					format!("{}...", &event.url[..available_for_url - 3])
+				} else if available_for_url > 0 {
+					event.url[..available_for_url].to_string()
+				} else {
+					String::new()
+				}
+			} else {
+				event.url.clone()
+			};
+
+			let padding_len =
+				(area.width as usize).saturating_sub(mark_len + left_len + display_url.len() + right_len + 1);
+			let padding = " ".repeat(padding_len);
+
+			let text = format!("{}{}{} {}", left_part, display_url, padding, right_part);
+
 			let is_error = matches!(event.event_type, ewd_core::events::NetworkEventType::Failed)
-				|| event.status_code.map_or(false, |s| s >= 400);
+				|| event.status_code.is_some_and(|s| s >= 400);
 
 			let color = if is_error {
 				Color::Red
 			} else if matches!(event.event_type, ewd_core::events::NetworkEventType::Started) {
 				Color::DarkGray
 			} else {
-				match event.method.to_uppercase().as_str() {
+				match method_upper.as_str() {
 					"GET" => Color::Green,
 					"POST" => Color::Cyan,
 					"PUT" => Color::Yellow,
@@ -193,7 +231,6 @@ impl ProjectView {
 				}
 			};
 
-			// Отметка: жёлтая ✓ для отмеченных событий, иначе пробел
 			let is_marked = state.marked_network_indices.contains(&event_idx);
 			let mark_span = if is_marked {
 				Span::styled("✓ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
@@ -201,17 +238,6 @@ impl ProjectView {
 				Span::raw("  ")
 			};
 
-			// Обрезка URL, если он слишком длинный
-			let display_url = if event.url.len() > max_url_len && max_url_len > 3 {
-				format!("{}...", &event.url[..max_url_len - 3])
-			} else {
-				event.url.clone()
-			};
-
-			let meta = format!("[ {} {} ] [{}]", method_upper, status_str, time_str);
-			let text = format!("{} {}", display_url, meta);
-
-			// Подсветка выбранной строки
 			let is_selected = i == cursor;
 			let style = if is_selected {
 				Style::default()
@@ -288,7 +314,7 @@ impl View for ProjectView {
 				width: area.width,
 				height: 1,
 			};
-			let filtered_count = state.filtered_network_indices().len();
+			let filtered_count = state.visible_network_indices().len();
 			let total_count = state.network_events.len();
 			let search_text = format!(" /{} │ {}/{} ", state.network_search_query, filtered_count, total_count);
 			let search_widget =
@@ -322,7 +348,6 @@ impl View for ProjectView {
 			Span::raw("")
 		};
 
-		// Подсказки для Network вкладки отличаются
 		let left_hints = if self.active_tab == ProjectTab::Network {
 			let marked_count = state.marked_network_indices.len();
 			let total_count = state.network_events.len();
@@ -330,7 +355,6 @@ impl View for ProjectView {
 				format!(" [Отмечено: {}/{}] ", marked_count, total_count),
 				Style::default().fg(Color::Yellow),
 			);
-
 			Line::from(vec![
 				Span::raw(" "),
 				Span::styled("↑/↓", key_style),
@@ -507,17 +531,29 @@ impl View for ProjectView {
 			}
 			Action::GenerateApiFile => {
 				if self.active_tab == ProjectTab::Network {
-					let events = state.marked_events();
-					log::debug!("GenerateApiFile triggered. Marked events count: {}", events.len());
-
-					if events.is_empty() {
-						log::warn!("Нет отмеченных запросов. Отметьте запросы клавишей Space перед генерацией.");
-						return Ok(true);
-					}
+					let mut events = state.marked_events();
+					let source = if events.is_empty() {
+						let visible_indices = state.visible_network_indices();
+						if visible_indices.is_empty() {
+							log::warn!("Нет запросов для генерации. Список пуст.");
+							return Ok(true);
+						}
+						let cursor = state.network_cursor.min(visible_indices.len().saturating_sub(1));
+						let event_idx = visible_indices[cursor];
+						if let Some(event) = state.network_events.get(event_idx) {
+							events = vec![event];
+							"current cursor"
+						} else {
+							log::warn!("Не удалось получить событие под курсором");
+							return Ok(true);
+						}
+					} else {
+						"marked events"
+					};
+					log::debug!("GenerateApiFile triggered. Source: {}, count: {}", source, events.len());
 
 					let entry_path = match state.current_project() {
 						Some(proj) => {
-							// Формируем АБСОЛЮТНЫЙ путь: ~/.config/ewd-tui/projects/<dir>/<entry>
 							let projects_base = match dirs::config_dir() {
 								Some(base) => base.join("ewd-tui").join("projects"),
 								None => {
@@ -538,9 +574,10 @@ impl View for ProjectView {
 					match crate::views::codegen::generate_api_file(&events, &entry_path) {
 						Ok(output_path) => {
 							log::info!(
-								"✅ Сгенерирован файл API: {} ({} функций)",
+								"✅ Сгенерирован файл API: {} ({} функций из {})",
 								output_path.display(),
-								events.len()
+								events.len(),
+								source
 							);
 						}
 						Err(e) => {

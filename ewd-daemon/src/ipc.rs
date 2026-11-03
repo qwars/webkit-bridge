@@ -99,7 +99,6 @@ impl IpcServer {
 		let mut event_rx = manager.subscribe();
 		let writer_for_events = Arc::clone(&writer);
 
-		// --- event_task сериализует все варианты DaemonEvent ---
 		let event_task = tokio::spawn(async move {
 			loop {
 				match event_rx.recv().await {
@@ -162,7 +161,6 @@ impl IpcServer {
 				}
 			}
 		});
-		// -------------------------------------------------------
 
 		loop {
 			line.clear();

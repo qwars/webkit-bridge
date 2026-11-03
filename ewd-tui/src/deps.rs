@@ -3,23 +3,13 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Проверить наличие внешних зависимостей
 pub fn check_dependencies() -> Result<()> {
 	check_ewd_daemon()?;
 	check_esbuild()?;
 	Ok(())
 }
 
-/// Найти путь к ewd-daemon
-/// Порядок поиска:
-/// 1. EWD_DAEMON_PATH env
-/// 2. ./target/release/ewd-daemon (относительно cwd)
-/// 3. ./target/debug/ewd-daemon (относительно cwd)
-/// 4. ../target/release/ewd-daemon (workspace target)
-/// 5. ../target/debug/ewd-daemon (workspace target)
-/// 6. which ewd-daemon (PATH)
 pub fn find_ewd_daemon() -> Result<PathBuf> {
-	// 1. Проверить env
 	if let Ok(path) = std::env::var("EWD_DAEMON_PATH") {
 		let path = PathBuf::from(path);
 		if is_executable_file(&path) {
@@ -27,7 +17,6 @@ pub fn find_ewd_daemon() -> Result<PathBuf> {
 		}
 	}
 
-	// 2-5. Проверить известные пути относительно cwd и workspace
 	let candidates = [
 		"./target/release/ewd-daemon",
 		"./target/debug/ewd-daemon",
@@ -42,7 +31,6 @@ pub fn find_ewd_daemon() -> Result<PathBuf> {
 		}
 	}
 
-	// 6. Проверить PATH через which
 	if let Ok(output) = Command::new("which").arg("ewd-daemon").output() {
 		if output.status.success() {
 			let path_str = String::from_utf8_lossy(&output.stdout);
@@ -70,7 +58,6 @@ pub fn find_ewd_daemon() -> Result<PathBuf> {
 	)
 }
 
-/// Проверить, что путь указывает на исполняемый файл
 fn is_executable_file(path: &Path) -> bool {
 	if !path.is_file() {
 		return false;
@@ -81,13 +68,11 @@ fn is_executable_file(path: &Path) -> bool {
 	}
 }
 
-/// Проверить наличие ewd-daemon
 fn check_ewd_daemon() -> Result<()> {
 	find_ewd_daemon().context("ewd-daemon обязателен для работы ewd-tui")?;
 	Ok(())
 }
 
-/// Проверить наличие esbuild в PATH
 fn check_esbuild() -> Result<()> {
 	let output = Command::new("which")
 		.arg("esbuild")

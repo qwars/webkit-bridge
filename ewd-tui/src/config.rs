@@ -6,18 +6,10 @@ use std::path::PathBuf;
 use crate::keys::Keymap;
 use crate::projects::config_dir;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GlobalConfig {
 	#[serde(default)]
 	pub keymap: Keymap,
-}
-
-impl Default for GlobalConfig {
-	fn default() -> Self {
-		Self {
-			keymap: Keymap::default(),
-		}
-	}
 }
 
 pub fn config_path() -> Result<PathBuf> {

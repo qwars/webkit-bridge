@@ -14,7 +14,6 @@ use crate::views::View;
 pub struct ProjectsView;
 
 impl ProjectsView {
-	/// Строка поиска с курсором
 	fn search_line(query: &str) -> Line<'static> {
 		Line::from(vec![
 			Span::styled("/ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
@@ -23,7 +22,6 @@ impl ProjectsView {
 		])
 	}
 
-	/// Подсветка совпавшей подстроки в имени проекта
 	fn name_spans(name: &str, query: &str, base_style: Style) -> Vec<Span<'static>> {
 		if query.is_empty() {
 			return vec![Span::styled(name.to_string(), base_style)];
@@ -72,7 +70,6 @@ impl View for ProjectsView {
 		let inner = title.inner(area);
 		f.render_widget(title, area);
 
-		// В режиме поиска верхняя строка внутренней области — поле ввода
 		let (search_area, list_area) = if state.search_mode && inner.height > 1 {
 			(
 				Some(Rect {
@@ -120,10 +117,9 @@ impl View for ProjectsView {
 						Style::default().fg(Color::White)
 					};
 
-					// Индикатор *: источники новее бандла (или бандл отсутствует)
 					let needs_rebuild = match crate::projects::get_bundle_mtime(&project.project.dir) {
 						Ok(bundle_mtime) => project.mtime > bundle_mtime,
-						Err(_) => true, // бандл отсутствует — нужна сборка
+						Err(_) => true,
 					};
 
 					let mut spans = Vec::new();

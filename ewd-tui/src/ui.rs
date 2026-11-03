@@ -150,10 +150,8 @@ async fn handle_key_event(
 		Screen::NetworkInspect(_) => KeyContext::NetworkInspect,
 	};
 
-	// Блокируем все клавиши во время сборки, кроме критичных
 	if state.is_building {
 		if matches!(context, KeyContext::NetworkSearch | KeyContext::NetworkInspect) {
-			// Разрешаем поиск и Inspect во время сборки
 		} else if let Some(action) = key_to_action(key, context, state.keymap) {
 			if matches!(action, Action::ToggleTabVisibility) {
 				if let Screen::Project(_) = &state.screen {
@@ -170,6 +168,7 @@ async fn handle_key_event(
 		context,
 		KeyContext::CreateProject | KeyContext::ProjectSearch | KeyContext::NetworkSearch
 	);
+
 	if !text_input {
 		if let Some(action) = key_to_action(key, KeyContext::Global, state.keymap) {
 			match action {
@@ -186,9 +185,7 @@ async fn handle_key_event(
 		}
 	}
 
-	// Специальная обработка для NetworkInspect
 	if let Screen::NetworkInspect(event_idx) = state.screen {
-		// Создаём view, если его нет или если индекс изменился
 		if network_inspect_view.is_none()
 			|| network_inspect_view.as_ref().map(|v| v.event_idx).unwrap_or(usize::MAX) != event_idx
 		{
@@ -199,7 +196,6 @@ async fn handle_key_event(
 
 		if let Some(action) = key_to_action(key, context, state.keymap) {
 			if matches!(action, Action::CloseNetworkInspect) {
-				// Восстанавливаем предыдущий экран
 				if let Some(prev) = previous_screen.take() {
 					state.screen = prev;
 				} else {
@@ -215,11 +211,17 @@ async fn handle_key_event(
 		return Ok(());
 	}
 
-	// Обработка перехода в NetworkInspect
 	if let Some(action) = key_to_action(key, context, state.keymap) {
 		if matches!(action, Action::OpenNetworkInspect) {
 			*previous_screen = Some(state.screen.clone());
 			state.open_network_inspect();
+
+			if let Screen::NetworkInspect(event_idx) = state.screen {
+				if let Some(event) = state.network_events.get(event_idx) {
+					*network_inspect_view = Some(NetworkInspectView::new(event_idx, event));
+				}
+			}
+
 			return Ok(());
 		}
 
@@ -239,5 +241,6 @@ async fn handle_key_event(
 			Screen::NetworkInspect(_) => unreachable!(),
 		}
 	}
+
 	Ok(())
 }
