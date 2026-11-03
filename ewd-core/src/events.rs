@@ -7,6 +7,7 @@ pub struct NetworkEvent {
 	pub method: String,
 	pub status_code: Option<u32>,
 	pub response_time_ms: Option<u64>,
+	pub response_size_bytes: Option<u64>,
 	pub event_type: NetworkEventType,
 	pub request_headers: Vec<(String, String)>,
 	pub response_headers: Vec<(String, String)>,
@@ -60,6 +61,7 @@ mod tests {
 				method: "GET".to_string(),
 				status_code: Some(200),
 				response_time_ms: Some(45),
+				response_size_bytes: Some(1024),
 				event_type: NetworkEventType::Finished,
 				request_headers: vec![("User-Agent".to_string(), "test".to_string())],
 				response_headers: vec![],
@@ -99,6 +101,7 @@ mod tests {
 					method: "GET".to_string(),
 					status_code: Some(200),
 					response_time_ms: Some(45),
+					response_size_bytes: Some(1024),
 					event_type: NetworkEventType::Finished,
 					request_headers: vec![],
 					response_headers: vec![],
@@ -106,7 +109,6 @@ mod tests {
 			},
 			DaemonEvent::Shutdown,
 		];
-
 		for event in events {
 			let json = serde_json::to_string(&event).unwrap();
 			let deserialized: DaemonEvent = serde_json::from_str(&json).unwrap();

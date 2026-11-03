@@ -1,21 +1,15 @@
-// ewd-tui/src/keys.rs
-
 use anyhow::{bail, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum Keymap {
+	#[default]
 	Emacs,
 	Vim,
 	Vscode,
-}
-
-impl Default for Keymap {
-	fn default() -> Self {
-		Keymap::Emacs
-	}
 }
 
 impl std::str::FromStr for Keymap {
@@ -109,12 +103,10 @@ pub enum Action {
 	SearchSubmit,
 	ConfirmDelete,
 	CancelDelete,
-	// Network search
 	EnterNetworkSearch,
 	ExitNetworkSearch,
 	NetworkSearchBackspace,
 	NetworkSearchInput(char),
-	// Network list navigation
 	OpenNetworkInspect,
 	CloseNetworkInspect,
 	NetworkMoveUp,
@@ -123,7 +115,6 @@ pub enum Action {
 	NetworkPageDown,
 	NetworkHome,
 	NetworkEnd,
-	// Network marks and code generation
 	ToggleNetworkMark,
 	ClearNetworkMarks,
 	GenerateApiFile,
@@ -338,12 +329,10 @@ fn buffer_view_action(key: KeyEvent, keymap: Keymap) -> Option<Action> {
 		}
 	}
 	if ctrl && !alt {
-		match key.code {
-			KeyCode::Char('r') => return Some(Action::RestartProject),
-			_ => {}
+		if let KeyCode::Char('r') = key.code {
+			return Some(Action::RestartProject);
 		}
 	}
-	// Специфичные паттерны с guard (shift) ДО общих паттернов без guard
 	match (key.code, ctrl, alt, shift) {
 		(KeyCode::Up, false, false, true) => return Some(Action::BufferSelectUp),
 		(KeyCode::Down, false, false, true) => return Some(Action::BufferSelectDown),
@@ -418,8 +407,6 @@ fn network_search_action(key: KeyEvent) -> Option<Action> {
 		_ => None,
 	}
 }
-
-/// Обработка клавиш в списке Network (когда НЕ активен поиск)
 fn network_list_action(key: KeyEvent, keymap: Keymap) -> Option<Action> {
 	let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 	let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -462,7 +449,6 @@ fn network_list_action(key: KeyEvent, keymap: Keymap) -> Option<Action> {
 	None
 }
 
-/// Обработка клавиш в экране Inspect
 fn network_inspect_action(key: KeyEvent) -> Option<Action> {
 	let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 	let alt = key.modifiers.contains(KeyModifiers::ALT);

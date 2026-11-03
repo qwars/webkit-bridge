@@ -29,7 +29,6 @@ pub fn build_esbuild_command(project: &Project) -> Result<(String, Vec<String>)>
 	Ok((cmd, args))
 }
 
-/// Запускает esbuild как дочерний процесс с piped stdout/stderr
 pub async fn spawn_esbuild(project: &Project) -> Result<tokio::process::Child> {
 	let entry = entry_path(project)?;
 	let bundle = bundle_path(&project.dir)?;
@@ -47,7 +46,6 @@ pub async fn spawn_esbuild(project: &Project) -> Result<tokio::process::Child> {
 	Ok(child)
 }
 
-/// Читает stdout/stderr дочернего процесса и ждёт его завершения
 pub async fn collect_build_output(child: &mut tokio::process::Child, bundle_path: PathBuf) -> Result<BuildOutput> {
 	let stdout = child.stdout.take().context("Failed to take stdout")?;
 	let stderr = child.stderr.take().context("Failed to take stderr")?;
@@ -55,7 +53,6 @@ pub async fn collect_build_output(child: &mut tokio::process::Child, bundle_path
 	let mut stdout_reader = BufReader::new(stdout);
 	let mut stderr_reader = BufReader::new(stderr);
 
-	// Читаем stdout и stderr параллельно
 	let stdout_task = tokio::spawn(async move {
 		let mut lines = String::new();
 		let mut line = String::new();
@@ -76,10 +73,8 @@ pub async fn collect_build_output(child: &mut tokio::process::Child, bundle_path
 		Ok::<String, std::io::Error>(lines)
 	});
 
-	// Ждём завершения процесса
 	let status = child.wait().await.context("Failed to wait for esbuild")?;
 
-	// Ждём завершения чтения stdout/stderr
 	let stdout_result = stdout_task.await.context("stdout task failed")??;
 	let stderr_result = stderr_task.await.context("stderr task failed")??;
 

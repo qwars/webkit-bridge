@@ -70,7 +70,6 @@ impl TextBuffer {
 				}
 			}
 			Err(_) => {
-				// Fallback: если парсинг ANSI не удался, добавляем как обычный текст
 				for line in text.split('\n') {
 					self.lines.push(BufferLine {
 						text: line.to_string(),
@@ -403,14 +402,12 @@ mod tests {
 		buffer.push_line("line 3".to_string());
 		assert!(buffer.auto_scroll);
 
-		// Поднимаемся на строку вверх, auto_scroll должен отключиться
 		buffer.move_up();
 		assert!(!buffer.auto_scroll);
 		assert_eq!(buffer.cursor_row, 1);
 
-		// Добавляем новую строку. Так как auto_scroll = false, курсор должен остаться на строке 1
 		buffer.push_line("line 4".to_string());
-		assert_eq!(buffer.cursor_row, 1); // Исправлено: было 2, должно быть 1
+		assert_eq!(buffer.cursor_row, 1);
 		assert_eq!(buffer.lines.len(), 4);
 	}
 

@@ -161,16 +161,12 @@ impl AppState {
 
 	pub fn drain_logs(&mut self) {
 		if let Some(rx) = &mut self.log_rx {
-			loop {
-				match rx.try_recv() {
-					Ok(line) => {
-						self.log_buffer.push_line(line);
-					}
-					Err(_) => break,
-				}
+			while let Ok(line) = rx.try_recv() {
+				self.log_buffer.push_line(line);
 			}
 		}
 	}
+
 	pub fn drain_network_events(&mut self) {
 		let rx = match self.network_rx.as_mut() {
 			Some(rx) => rx,
@@ -246,15 +242,12 @@ impl AppState {
 			}
 		}
 
-		// Trim после обработки всех событий — единая точка обрезки
 		let overflow = self.network_events.len().saturating_sub(MAX_LOG_LINES);
 		if overflow > 0 {
 			self.trim_network_history(overflow);
 		}
 	}
-	/// Удаляет `trimmed` самых старых событий и синхронно сдвигает индексы отметок.
-	/// Отметки удалённых событий отбрасываются. Курсор клампится в границы
-	/// отфильтрованного списка.
+
 	pub fn trim_network_history(&mut self, trimmed: usize) {
 		if trimmed == 0 {
 			return;
@@ -273,22 +266,46 @@ impl AppState {
 			.collect();
 		self.marked_network_indices = shifted;
 
-		let len = self.filtered_network_indices().len();
+		let len = self.visible_network_indices().len();
 		self.network_cursor = if len == 0 { 0 } else { self.network_cursor.min(len - 1) };
 	}
 
-	pub fn filtered_network_indices(&self) -> Vec<usize> {
-		if self.network_search_query.is_empty() {
-			return (0..self.network_events.len()).collect();
-		}
+	pub fn visible_network_indices(&self) -> Vec<usize> {
+		let completed: HashSet<(String, String)> = self
+			.network_events
+			.iter()
+			.filter(|e| {
+				matches!(
+					e.event_type,
+					ewd_core::events::NetworkEventType::Finished | ewd_core::events::NetworkEventType::Failed
+				)
+			})
+			.map(|e| (e.url.clone(), e.method.clone()))
+			.collect();
 
-		let query = self.network_search_query.to_lowercase();
-		self.network_events
+		let mut indices: Vec<usize> = self
+			.network_events
 			.iter()
 			.enumerate()
-			.filter(|(_, e)| e.url.to_lowercase().contains(&query) || e.method.to_lowercase().contains(&query))
+			.filter(|(_, e)| {
+				if matches!(e.event_type, ewd_core::events::NetworkEventType::Started) {
+					!completed.contains(&(e.url.clone(), e.method.clone()))
+				} else {
+					true
+				}
+			})
 			.map(|(i, _)| i)
-			.collect()
+			.collect();
+
+		if !self.network_search_query.is_empty() {
+			let query = self.network_search_query.to_lowercase();
+			indices.retain(|&i| {
+				let e = &self.network_events[i];
+				e.url.to_lowercase().contains(&query) || e.method.to_lowercase().contains(&query)
+			});
+		}
+
+		indices
 	}
 
 	pub fn enter_network_search(&mut self) {
@@ -313,7 +330,6 @@ impl AppState {
 		self.network_cursor = 0;
 	}
 
-	/// Навигация по отфильтрованному списку событий (не по буферу)
 	pub fn network_move_up(&mut self) {
 		if self.network_cursor > 0 {
 			self.network_cursor -= 1;
@@ -321,7 +337,7 @@ impl AppState {
 	}
 
 	pub fn network_move_down(&mut self) {
-		let len = self.filtered_network_indices().len();
+		let len = self.visible_network_indices().len();
 		if len > 0 && self.network_cursor < len.saturating_sub(1) {
 			self.network_cursor += 1;
 		}
@@ -332,7 +348,7 @@ impl AppState {
 	}
 
 	pub fn network_page_down(&mut self, page_size: usize) {
-		let len = self.filtered_network_indices().len();
+		let len = self.visible_network_indices().len();
 		if len > 0 {
 			self.network_cursor = (self.network_cursor + page_size).min(len.saturating_sub(1));
 		}
@@ -343,14 +359,14 @@ impl AppState {
 	}
 
 	pub fn network_end(&mut self) {
-		let len = self.filtered_network_indices().len();
+		let len = self.visible_network_indices().len();
 		if len > 0 {
 			self.network_cursor = len.saturating_sub(1);
 		}
 	}
 
 	pub fn open_network_inspect(&mut self) {
-		let indices = self.filtered_network_indices();
+		let indices = self.visible_network_indices();
 		if indices.is_empty() {
 			return;
 		}
@@ -359,9 +375,8 @@ impl AppState {
 		self.screen = Screen::NetworkInspect(event_idx);
 	}
 
-	/// Toggle отметки для текущего курсора в отфильтрованном списке
 	pub fn toggle_network_mark(&mut self) {
-		let indices = self.filtered_network_indices();
+		let indices = self.visible_network_indices();
 		if indices.is_empty() {
 			return;
 		}
@@ -375,12 +390,10 @@ impl AppState {
 		}
 	}
 
-	/// Снять все отметки
 	pub fn clear_network_marks(&mut self) {
 		self.marked_network_indices.clear();
 	}
 
-	/// Вернуть список отмеченных событий в порядке их появления
 	pub fn marked_events(&self) -> Vec<&NetworkEvent> {
 		let mut indices: Vec<usize> = self.marked_network_indices.iter().copied().collect();
 		indices.sort();
@@ -652,13 +665,14 @@ mod tests {
 		}
 	}
 
-	fn make_network_event(url: &str, method: &str) -> NetworkEvent {
+	fn make_network_event(url: &str, method: &str, event_type: ewd_core::events::NetworkEventType) -> NetworkEvent {
 		NetworkEvent {
 			url: url.to_string(),
 			method: method.to_string(),
 			status_code: Some(200),
 			response_time_ms: Some(10),
-			event_type: ewd_core::events::NetworkEventType::Finished,
+			response_size_bytes: Some(1024),
+			event_type,
 			request_headers: vec![],
 			response_headers: vec![],
 		}
@@ -712,9 +726,9 @@ mod tests {
 	fn test_network_cursor_navigation() {
 		let mut state = mock_state();
 		state.network_events = vec![
-			make_network_event("https://a.com", "GET"),
-			make_network_event("https://b.com", "POST"),
-			make_network_event("https://c.com", "GET"),
+			make_network_event("https://a.com", "GET", ewd_core::events::NetworkEventType::Finished),
+			make_network_event("https://b.com", "POST", ewd_core::events::NetworkEventType::Finished),
+			make_network_event("https://c.com", "GET", ewd_core::events::NetworkEventType::Finished),
 		];
 
 		assert_eq!(state.network_cursor, 0);
@@ -722,7 +736,7 @@ mod tests {
 		assert_eq!(state.network_cursor, 1);
 		state.network_move_down();
 		assert_eq!(state.network_cursor, 2);
-		state.network_move_down(); // Не должно выйти за пределы
+		state.network_move_down();
 		assert_eq!(state.network_cursor, 2);
 		state.network_move_up();
 		assert_eq!(state.network_cursor, 1);
@@ -736,18 +750,17 @@ mod tests {
 	fn test_network_cursor_respects_filter() {
 		let mut state = mock_state();
 		state.network_events = vec![
-			make_network_event("https://a.com/api", "GET"),
-			make_network_event("https://b.com", "POST"),
-			make_network_event("https://c.com/api", "GET"),
+			make_network_event("https://a.com/api", "GET", ewd_core::events::NetworkEventType::Finished),
+			make_network_event("https://b.com", "POST", ewd_core::events::NetworkEventType::Finished),
+			make_network_event("https://c.com/api", "GET", ewd_core::events::NetworkEventType::Finished),
 		];
 
 		state.network_search_query = "api".to_string();
-		// Отфильтрованы: 0 и 2
-		assert_eq!(state.filtered_network_indices(), vec![0, 2]);
+		assert_eq!(state.visible_network_indices(), vec![0, 2]);
 
 		state.network_move_down();
-		assert_eq!(state.network_cursor, 1); // Второй в отфильтрованном списке
-		state.network_move_down(); // Не должно выйти за пределы (всего 2)
+		assert_eq!(state.network_cursor, 1);
+		state.network_move_down();
 		assert_eq!(state.network_cursor, 1);
 	}
 
@@ -755,15 +768,14 @@ mod tests {
 	fn test_open_network_inspect() {
 		let mut state = mock_state();
 		state.network_events = vec![
-			make_network_event("https://a.com", "GET"),
-			make_network_event("https://b.com", "POST"),
+			make_network_event("https://a.com", "GET", ewd_core::events::NetworkEventType::Finished),
+			make_network_event("https://b.com", "POST", ewd_core::events::NetworkEventType::Finished),
 		];
 		state.screen = Screen::Project("proj-a".to_string());
 
-		state.network_move_down(); // cursor = 1
+		state.network_move_down();
 		state.open_network_inspect();
 
-		// Должен открыться экран Inspect с индексом события 1
 		assert!(matches!(state.screen, Screen::NetworkInspect(1)));
 	}
 
@@ -771,24 +783,21 @@ mod tests {
 	fn test_toggle_network_mark() {
 		let mut state = mock_state();
 		state.network_events = vec![
-			make_network_event("https://a.com", "GET"),
-			make_network_event("https://b.com", "POST"),
-			make_network_event("https://c.com", "GET"),
+			make_network_event("https://a.com", "GET", ewd_core::events::NetworkEventType::Finished),
+			make_network_event("https://b.com", "POST", ewd_core::events::NetworkEventType::Finished),
+			make_network_event("https://c.com", "GET", ewd_core::events::NetworkEventType::Finished),
 		];
 
-		// Курсор на 0, отмечаем
 		state.toggle_network_mark();
 		assert!(state.marked_network_indices.contains(&0));
 		assert_eq!(state.marked_network_indices.len(), 1);
 
-		// Переходим на 1
 		state.network_move_down();
 		state.toggle_network_mark();
 		assert!(state.marked_network_indices.contains(&0));
 		assert!(state.marked_network_indices.contains(&1));
 		assert_eq!(state.marked_network_indices.len(), 2);
 
-		// Снимаем отметку с 1 (повторный toggle)
 		state.toggle_network_mark();
 		assert!(state.marked_network_indices.contains(&0));
 		assert!(!state.marked_network_indices.contains(&1));
@@ -799,12 +808,11 @@ mod tests {
 	fn test_marked_events() {
 		let mut state = mock_state();
 		state.network_events = vec![
-			make_network_event("https://a.com", "GET"),
-			make_network_event("https://b.com", "POST"),
-			make_network_event("https://c.com", "GET"),
+			make_network_event("https://a.com", "GET", ewd_core::events::NetworkEventType::Finished),
+			make_network_event("https://b.com", "POST", ewd_core::events::NetworkEventType::Finished),
+			make_network_event("https://c.com", "GET", ewd_core::events::NetworkEventType::Finished),
 		];
 
-		// Отмечаем 0 и 2
 		state.marked_network_indices.insert(0);
 		state.marked_network_indices.insert(2);
 
@@ -818,8 +826,8 @@ mod tests {
 	fn test_clear_network_marks() {
 		let mut state = mock_state();
 		state.network_events = vec![
-			make_network_event("https://a.com", "GET"),
-			make_network_event("https://b.com", "POST"),
+			make_network_event("https://a.com", "GET", ewd_core::events::NetworkEventType::Finished),
+			make_network_event("https://b.com", "POST", ewd_core::events::NetworkEventType::Finished),
 		];
 
 		state.marked_network_indices.insert(0);
@@ -834,20 +842,17 @@ mod tests {
 	fn test_marked_indices_shift_on_trim() {
 		let mut state = mock_state();
 		state.network_events = vec![
-			make_network_event("https://a.com", "GET"),
-			make_network_event("https://b.com", "POST"),
-			make_network_event("https://c.com", "GET"),
-			make_network_event("https://d.com", "POST"),
+			make_network_event("https://a.com", "GET", ewd_core::events::NetworkEventType::Finished),
+			make_network_event("https://b.com", "POST", ewd_core::events::NetworkEventType::Finished),
+			make_network_event("https://c.com", "GET", ewd_core::events::NetworkEventType::Finished),
+			make_network_event("https://d.com", "POST", ewd_core::events::NetworkEventType::Finished),
 		];
 
-		// Отмечены 1 (b) и 3 (d)
 		state.marked_network_indices.insert(1);
 		state.marked_network_indices.insert(3);
 
-		// Удаляем первые 2 события (a и b)
 		state.trim_network_history(2);
 
-		// Отметка b исчезла, отметка d сместилась 3 -> 1
 		assert_eq!(state.marked_network_indices.len(), 1);
 		assert!(state.marked_network_indices.contains(&1));
 		assert_eq!(state.network_events.len(), 2);
@@ -858,18 +863,17 @@ mod tests {
 	fn test_trim_drops_removed_marks() {
 		let mut state = mock_state();
 		state.network_events = vec![
-			make_network_event("https://a.com", "GET"),
-			make_network_event("https://b.com", "POST"),
-			make_network_event("https://c.com", "GET"),
-			make_network_event("https://d.com", "POST"),
+			make_network_event("https://a.com", "GET", ewd_core::events::NetworkEventType::Finished),
+			make_network_event("https://b.com", "POST", ewd_core::events::NetworkEventType::Finished),
+			make_network_event("https://c.com", "GET", ewd_core::events::NetworkEventType::Finished),
+			make_network_event("https://d.com", "POST", ewd_core::events::NetworkEventType::Finished),
 		];
 
-		state.marked_network_indices.insert(2); // c
-		state.marked_network_indices.insert(3); // d
+		state.marked_network_indices.insert(2);
+		state.marked_network_indices.insert(3);
 
 		state.trim_network_history(2);
 
-		// c: 2 -> 0, d: 3 -> 1
 		assert!(state.marked_network_indices.contains(&0));
 		assert!(state.marked_network_indices.contains(&1));
 		assert_eq!(state.marked_network_indices.len(), 2);
@@ -883,13 +887,12 @@ mod tests {
 	fn test_trim_clamps_cursor() {
 		let mut state = mock_state();
 		state.network_events = vec![
-			make_network_event("https://a.com", "GET"),
-			make_network_event("https://b.com", "POST"),
-			make_network_event("https://c.com", "GET"),
+			make_network_event("https://a.com", "GET", ewd_core::events::NetworkEventType::Finished),
+			make_network_event("https://b.com", "POST", ewd_core::events::NetworkEventType::Finished),
+			make_network_event("https://c.com", "GET", ewd_core::events::NetworkEventType::Finished),
 		];
 		state.network_cursor = 2;
 
-		// Удаляем 2 события — осталось 1, курсор должен стать 0
 		state.trim_network_history(2);
 		assert_eq!(state.network_cursor, 0);
 	}
@@ -898,8 +901,8 @@ mod tests {
 	fn test_trim_zero_is_noop() {
 		let mut state = mock_state();
 		state.network_events = vec![
-			make_network_event("https://a.com", "GET"),
-			make_network_event("https://b.com", "POST"),
+			make_network_event("https://a.com", "GET", ewd_core::events::NetworkEventType::Finished),
+			make_network_event("https://b.com", "POST", ewd_core::events::NetworkEventType::Finished),
 		];
 		state.marked_network_indices.insert(1);
 
@@ -907,5 +910,30 @@ mod tests {
 
 		assert_eq!(state.network_events.len(), 2);
 		assert!(state.marked_network_indices.contains(&1));
+	}
+
+	#[test]
+	fn test_started_collapsed_when_finished_exists() {
+		let mut state = mock_state();
+		state.network_events = vec![
+			make_network_event("https://a.com", "GET", ewd_core::events::NetworkEventType::Started),
+			make_network_event("https://a.com", "GET", ewd_core::events::NetworkEventType::Finished),
+			make_network_event("https://b.com", "POST", ewd_core::events::NetworkEventType::Started),
+		];
+
+		let visible = state.visible_network_indices();
+		assert_eq!(visible, vec![1, 2]);
+	}
+
+	#[test]
+	fn test_started_visible_when_no_finished() {
+		let mut state = mock_state();
+		state.network_events = vec![
+			make_network_event("https://a.com", "GET", ewd_core::events::NetworkEventType::Started),
+			make_network_event("https://b.com", "POST", ewd_core::events::NetworkEventType::Started),
+		];
+
+		let visible = state.visible_network_indices();
+		assert_eq!(visible, vec![0, 1]);
 	}
 }

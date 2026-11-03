@@ -136,13 +136,11 @@ fn main() -> Result<()> {
 					let id = Uuid::new_v4();
 					let tab = Tab::new(id, &url, visible, manager.proxy_uri(), client_id, owner_pid);
 
-					// --- Подключаем мониторинг сети ---
 					let event_tx_monitor = manager.event_tx();
 					let tab_id = id;
 					tab.setup_network_monitoring(move |event| {
 						let _ = event_tx_monitor.send(DaemonEvent::NetworkEvent { id: tab_id, event });
 					});
-					// --------------------------------
 
 					if let Some(ref win) = tab.window {
 						let id_clone = id;
@@ -310,14 +308,14 @@ fn main() -> Result<()> {
 						let id_clone = id;
 						let tabs_clone = std::rc::Rc::clone(&tabs);
 						let event_tx_clone = manager.event_tx();
-						if let Some(tab) = tabs.borrow().get(&id) {
-							if let Some(win) = tab.window.as_ref() {
-								win.connect_close_request(move |_| {
-									tabs_clone.borrow_mut().remove(&id_clone);
-									let _ = event_tx_clone.send(DaemonEvent::TabClosed { id: id_clone });
-									gtk4::glib::Propagation::Proceed
-								});
-							}
+						if let Some(tab) = tabs.borrow().get(&id)
+							&& let Some(win) = tab.window.as_ref()
+						{
+							win.connect_close_request(move |_| {
+								tabs_clone.borrow_mut().remove(&id_clone);
+								let _ = event_tx_clone.send(DaemonEvent::TabClosed { id: id_clone });
+								gtk4::glib::Propagation::Proceed
+							});
 						}
 					}
 					if res.is_ok() {

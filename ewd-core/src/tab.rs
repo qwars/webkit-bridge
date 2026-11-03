@@ -28,13 +28,16 @@ impl Tab {
 		owner_pid: Option<i32>,
 	) -> Self {
 		let webview = WebView::new();
-		if let Some(proxy) = proxy_uri {
-			if let Some(session) = webview.network_session() {
-				let proxy_settings = NetworkProxySettings::new(Some(proxy.as_str()), &[]);
-				session.set_proxy_settings(NetworkProxyMode::Custom, Some(&proxy_settings));
-			}
+
+		if let Some(proxy) = proxy_uri
+			&& let Some(session) = webview.network_session()
+		{
+			let proxy_settings = NetworkProxySettings::new(Some(proxy.as_str()), &[]);
+			session.set_proxy_settings(NetworkProxyMode::Custom, Some(&proxy_settings));
 		}
+
 		webview.load_uri(url);
+
 		let window = if visible {
 			let win = gtk4::Window::new();
 			win.set_title(Some(&format!("EWD Tab - {}", id)));
@@ -45,6 +48,7 @@ impl Tab {
 		} else {
 			None
 		};
+
 		Self {
 			id,
 			url: url.to_string(),
@@ -106,7 +110,7 @@ impl Tab {
 					.map(|m| m.to_string())
 					.unwrap_or_else(|| "GET".to_string());
 
-				// Извлекаем заголовки запроса (foreach — встроенный метод, импорт не нужен)
+				// Извлекаем заголовки запроса
 				let mut req_headers = Vec::new();
 				if let Some(headers) = request.http_headers() {
 					headers.foreach(|name, value| {
@@ -128,6 +132,7 @@ impl Tab {
 						method: method.clone(),
 						status_code: None,
 						response_time_ms: None,
+						response_size_bytes: None,
 						event_type: NetworkEventType::Started,
 						request_headers: (*req_headers_arc).clone(),
 						response_headers: Vec::new(),
@@ -146,15 +151,22 @@ impl Tab {
 						let mut map = timings_finished.lock().unwrap();
 						map.remove(&uri_finished).map(|t| t.elapsed().as_millis() as u64)
 					};
+
 					let status_code = res.response().map(|r| r.status_code());
 
+					// Извлекаем размер ответа
+					let response_size_bytes = res.response().and_then(|r| {
+						let len = r.content_length();
+						if len > 0 { Some(len) } else { None }
+					});
+
 					let mut resp_headers = Vec::new();
-					if let Some(response) = res.response() {
-						if let Some(headers) = response.http_headers() {
-							headers.foreach(|name, value| {
-								resp_headers.push((name.to_string(), value.to_string()));
-							});
-						}
+					if let Some(response) = res.response()
+						&& let Some(headers) = response.http_headers()
+					{
+						headers.foreach(|name, value| {
+							resp_headers.push((name.to_string(), value.to_string()));
+						});
 					}
 
 					let cb = callback_finished.lock().unwrap();
@@ -163,6 +175,7 @@ impl Tab {
 						method: method_finished.clone(),
 						status_code,
 						response_time_ms,
+						response_size_bytes,
 						event_type: NetworkEventType::Finished,
 						request_headers: (*req_headers_finished).clone(),
 						response_headers: resp_headers,
@@ -188,6 +201,7 @@ impl Tab {
 						method: method_failed.clone(),
 						status_code: None,
 						response_time_ms,
+						response_size_bytes: None,
 						event_type: NetworkEventType::Failed,
 						request_headers: (*req_headers_failed).clone(),
 						response_headers: Vec::new(),

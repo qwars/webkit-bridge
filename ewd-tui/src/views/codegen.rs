@@ -1,8 +1,3 @@
-//! Генератор JS/TS кода из отмеченных сетевых запросов.
-//!
-//! Формат определяется расширением entry point проекта:
-//! `.js` / `.mjs` -> ES6 modules, `.cjs` -> CommonJS, `.ts` -> TypeScript.
-
 use anyhow::{Context, Result};
 use ewd_core::events::NetworkEvent;
 use std::collections::HashSet;
@@ -10,13 +5,29 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use url::Url;
 
-/// Сегменты пути, не участвующие в имени функции (`/api/v1/users` -> `fetchUsers`)
-const GENERIC_SEGMENTS: &[&str] = &["api", "rest", "graphql", "v1", "v2", "v3"];
-
-/// Максимум значимых сегментов в имени функции
+const GENERIC_SEGMENTS: &[&str] = &[
+	"api",
+	"rest",
+	"graphql",
+	"v1",
+	"v2",
+	"v3",
+	"_",
+	"s3",
+	"static",
+	"assets",
+	"cdn",
+	"public",
+	"media",
+	"files",
+	"home",
+	"home-static",
+	"content",
+	"resources",
+	"res",
+];
 const MAX_NAME_SEGMENTS: usize = 3;
 
-/// Зарезервированные слова и имена локальных переменных генерируемой функции
 const RESERVED: &[&str] = &[
 	"default", "function", "class", "return", "new", "delete", "var", "let", "const", "this", "typeof", "void", "in",
 	"of", "if", "else", "for", "while", "url", "options", "response", "fetch", "await", "async", "export", "import",
@@ -29,8 +40,6 @@ enum CodeFormat {
 	TypeScript,
 }
 
-/// Генерирует файл API из списка отмеченных сетевых событий.
-/// Файл перезаписывается при каждом вызове.
 pub fn generate_api_file(events: &[&NetworkEvent], entry_path: &Path) -> Result<PathBuf> {
 	if events.is_empty() {
 		anyhow::bail!("Нет событий для генерации");
@@ -81,20 +90,13 @@ pub fn generate_api_file(events: &[&NetworkEvent], entry_path: &Path) -> Result<
 	Ok(output_path)
 }
 
-// ---------------------------------------------------------------------------
-// Разбор URL
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Default)]
 struct UrlParts {
-	/// `https://host:port` либо пустая строка для относительного URL
 	origin: String,
 	segments: Vec<String>,
 	query: Vec<(String, String)>,
 }
 
-/// Устойчивый разбор URL: поддерживает абсолютные и относительные адреса,
-/// никогда не паникует.
 fn parse_url_parts(raw: &str) -> UrlParts {
 	if let Ok(u) = Url::parse(raw) {
 		let mut origin = String::new();
@@ -114,7 +116,6 @@ fn parse_url_parts(raw: &str) -> UrlParts {
 		};
 	}
 
-	// Относительный URL: /api/users?limit=10
 	let (path, query_str) = match raw.split_once('?') {
 		Some((p, q)) => (p, Some(q)),
 		None => (raw, None),
@@ -146,7 +147,6 @@ fn split_path(path: &str) -> Vec<String> {
 		.collect()
 }
 
-/// Сегмент считается динамическим параметром: число, UUID или длинный hex-id.
 fn is_dynamic_segment(s: &str) -> bool {
 	if s.is_empty() {
 		return false;
@@ -161,11 +161,15 @@ fn is_dynamic_segment(s: &str) -> bool {
 	s.len() >= 16 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-// ---------------------------------------------------------------------------
-// Имена
-// ---------------------------------------------------------------------------
+fn is_hash_like(s: &str) -> bool {
+	if s.len() <= 12 {
+		return false;
+	}
+	let hex_count = s.chars().filter(|c| c.is_ascii_hexdigit()).count();
+	let hex_ratio = hex_count as f64 / s.len() as f64;
+	hex_ratio > 0.7
+}
 
-/// PascalCase для склейки с префиксом метода: `portal-feed` -> `PortalFeed`
 fn to_camel_case(s: &str) -> String {
 	let mut result = String::new();
 	let mut upper_next = true;
@@ -197,17 +201,24 @@ fn method_prefix(method: &str) -> &'static str {
 	}
 }
 
-/// `/portal/feed` -> `fetchPortalFeed`, `/users/123` -> `postUsers`,
-/// `/api/items/456` -> `deleteItems`
+fn strip_file_extension(segment: &str) -> String {
+	match segment.rsplit_once('.') {
+		Some((name, ext)) if ext.len() <= 4 && ext.chars().all(|c| c.is_ascii_alphanumeric()) => name.to_string(),
+		_ => segment.to_string(),
+	}
+}
+
 fn extract_function_name(method: &str, url: &str) -> String {
 	let prefix = method_prefix(method);
 	let parts = parse_url_parts(url);
 
-	let meaningful: Vec<&String> = parts
+	let meaningful: Vec<String> = parts
 		.segments
 		.iter()
 		.filter(|s| !is_dynamic_segment(s))
 		.filter(|s| !GENERIC_SEGMENTS.contains(&s.to_ascii_lowercase().as_str()))
+		.filter(|s| !is_hash_like(s))
+		.map(|s| strip_file_extension(s))
 		.collect();
 
 	if meaningful.is_empty() {
@@ -215,12 +226,16 @@ fn extract_function_name(method: &str, url: &str) -> String {
 		return format!("{}{}", prefix, fallback);
 	}
 
-	let start = meaningful.len().saturating_sub(MAX_NAME_SEGMENTS);
-	let name: String = meaningful[start..].iter().map(|s| to_camel_case(s)).collect();
+	let name: String = if meaningful.len() > 2 {
+		to_camel_case(&meaningful[meaningful.len() - 1])
+	} else {
+		let start = meaningful.len().saturating_sub(MAX_NAME_SEGMENTS);
+		meaningful[start..].iter().map(|s| to_camel_case(s)).collect()
+	};
+
 	format!("{}{}", prefix, name)
 }
 
-/// Приводит имя query-параметра к валидному JS-идентификатору
 fn sanitize_identifier(raw: &str) -> String {
 	let mut out = String::new();
 	for (i, c) in raw.chars().enumerate() {
@@ -242,7 +257,6 @@ fn sanitize_identifier(raw: &str) -> String {
 	out
 }
 
-/// Подбирает свободное имя: `id`, `id_1`, `id_2`, ...
 fn unique_name(base: &str, taken: &mut HashSet<String>) -> String {
 	let mut candidate = base.to_string();
 	let mut counter = 1;
@@ -254,8 +268,7 @@ fn unique_name(base: &str, taken: &mut HashSet<String>) -> String {
 	candidate
 }
 
-/// Дубликаты имён функций: `postClckClick`, `postClckClick_1`, `postClckClick_2`
-fn deduplicate_names(names: &mut Vec<String>) {
+fn deduplicate_names(names: &mut [String]) {
 	let mut used: HashSet<String> = HashSet::new();
 	for name in names.iter_mut() {
 		let base = name.clone();
@@ -270,7 +283,6 @@ fn deduplicate_names(names: &mut Vec<String>) {
 	}
 }
 
-/// Параметры пути: числа/UUID -> `id`, `id1`, `id2` со исходным значением
 #[cfg(test)]
 fn extract_path_params(url: &str) -> Vec<(String, String)> {
 	let parts = parse_url_parts(url);
@@ -289,16 +301,12 @@ fn extract_path_params(url: &str) -> Vec<(String, String)> {
 	}
 	params
 }
+
 #[cfg(test)]
 fn extract_query_params(url: &str) -> Vec<(String, String)> {
 	parse_url_parts(url).query
 }
 
-// ---------------------------------------------------------------------------
-// Литералы и экранирование
-// ---------------------------------------------------------------------------
-
-/// Одинарная JS-строка с экранированием
 fn js_string(value: &str) -> String {
 	let mut out = String::with_capacity(value.len() + 2);
 	out.push('\'');
@@ -317,7 +325,6 @@ fn js_string(value: &str) -> String {
 	out
 }
 
-/// Экранирование литеральной части template literal
 fn escape_template(value: &str) -> String {
 	value.replace('\\', "\\\\").replace('`', "\\`").replace("${", "\\${")
 }
@@ -328,7 +335,6 @@ fn is_numeric_value(value: &str) -> bool {
 		&& value.parse::<f64>().is_ok()
 }
 
-/// (тип для TS, JS-литерал)
 fn literal_for(value: &str) -> (&'static str, String) {
 	if is_numeric_value(value) {
 		("number", value.to_string())
@@ -337,11 +343,9 @@ fn literal_for(value: &str) -> (&'static str, String) {
 	}
 }
 
-/// Заголовки запроса в виде JS-объекта
 fn format_headers(headers: &[(String, String)]) -> String {
 	let lines: Vec<String> = headers
 		.iter()
-		// HTTP/2 pseudo-headers (":method", ":path") fetch не принимает
 		.filter(|(k, _)| !k.is_empty() && !k.starts_with(':'))
 		.map(|(k, v)| format!("    {}: {}", js_string(k), js_string(v)))
 		.collect();
@@ -352,10 +356,6 @@ fn format_headers(headers: &[(String, String)]) -> String {
 		format!("{{\n{}\n  }}", lines.join(",\n"))
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Генерация функции
-// ---------------------------------------------------------------------------
 
 struct FnParam {
 	name: String,
@@ -456,7 +456,6 @@ fn generate_function(event: &NetworkEvent, func_name: &str, format: CodeFormat) 
 
 	let mut code = String::new();
 
-	// Документация: метод, URL, статус и все response headers
 	code.push_str("/**\n");
 	code.push_str(&format!(" * {} {}\n", method, event.url));
 	if let Some(status) = event.status_code {
@@ -508,6 +507,7 @@ mod tests {
 			method: method.to_string(),
 			status_code: Some(200),
 			response_time_ms: Some(10),
+			response_size_bytes: Some(1024),
 			event_type: NetworkEventType::Finished,
 			request_headers: vec![
 				("Content-Type".to_string(), "application/json".to_string()),
@@ -517,7 +517,6 @@ mod tests {
 		}
 	}
 
-	/// Уникальный каталог на тест — исключает гонки при параллельном запуске
 	fn temp_entry(test_name: &str, file: &str) -> PathBuf {
 		let dir = std::env::temp_dir().join(format!("ewd-codegen-{}-{}", std::process::id(), test_name));
 		fs::create_dir_all(&dir).unwrap();
@@ -559,6 +558,17 @@ mod tests {
 			"fetchUsers"
 		);
 		assert_eq!(extract_function_name("GET", "https://example.com/"), "fetchRoot");
+	}
+
+	#[test]
+	fn test_extract_function_name_ignores_hash() {
+		assert_eq!(
+			extract_function_name(
+				"GET",
+				"https://example.com/s3/home-static/5be261058ebed63a30849c5d966ab70f/script.js"
+			),
+			"fetchScript"
+		);
 	}
 
 	#[test]

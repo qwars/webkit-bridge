@@ -5,7 +5,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-/// Конфигурация проекта (настройки отображения и сборки)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProjectConfig {
 	pub name: String,
@@ -26,7 +25,6 @@ fn default_watch_extensions() -> Vec<String> {
 	]
 }
 
-/// Проект = директория + конфигурация
 #[derive(Debug, Clone)]
 pub struct Project {
 	pub dir: String,
@@ -137,8 +135,6 @@ pub fn get_project_mtime(dir: &str) -> Result<SystemTime> {
 		.with_context(|| format!("Failed to get modification time for {:?}", config_path))
 }
 
-/// Получить время модификации бандла
-/// Возвращает Err, если бандл не существует
 pub fn get_bundle_mtime(dir: &str) -> Result<SystemTime> {
 	let bundle = bundle_path(dir)?;
 	let metadata = fs::metadata(&bundle).with_context(|| format!("Failed to get metadata for {:?}", bundle))?;
@@ -147,8 +143,6 @@ pub fn get_bundle_mtime(dir: &str) -> Result<SystemTime> {
 		.with_context(|| format!("Failed to get modification time for {:?}", bundle))
 }
 
-/// Получить максимальное время модификации исходников проекта
-/// Рекурсивно обходит директорию, исключая служебные папки
 pub fn get_sources_mtime(dir: &str) -> Result<SystemTime> {
 	let project_path = project_dir(dir)?;
 	let mut max_time = SystemTime::UNIX_EPOCH;
@@ -158,7 +152,6 @@ pub fn get_sources_mtime(dir: &str) -> Result<SystemTime> {
 			let entry = entry?;
 			let path = entry.path();
 
-			// Пропускаем служебные директории
 			if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
 				if name == "node_modules" || name == ".git" || name == "target" || name == "bundles" {
 					continue;
@@ -184,7 +177,6 @@ pub fn get_sources_mtime(dir: &str) -> Result<SystemTime> {
 	Ok(max_time)
 }
 
-/// Форматирует время как "2ч назад", "вчера", "3 дня назад" и т.д.
 pub fn format_mtime(mtime: SystemTime) -> String {
 	let now = SystemTime::now();
 	let duration = match now.duration_since(mtime) {
@@ -254,9 +246,7 @@ pub fn list_projects() -> Result<Vec<(Project, SystemTime)>> {
 		}
 	}
 
-	// Сортируем по времени изменения (новые в начало)
-	projects.sort_by(|a, b| b.1.cmp(&a.1));
-
+	projects.sort_by_key(|a| std::cmp::Reverse(a.1));
 	Ok(projects)
 }
 
@@ -495,7 +485,7 @@ mod tests {
 		assert!(validate_entry_extension("main.css").is_ok());
 		assert!(validate_entry_extension("main.json").is_ok());
 		assert!(validate_entry_extension("src/main.ts").is_ok());
-		assert!(validate_entry_extension("main.JS").is_ok()); // case-insensitive
+		assert!(validate_entry_extension("main.JS").is_ok());
 	}
 
 	#[test]
@@ -504,7 +494,7 @@ mod tests {
 		assert!(validate_entry_extension("main.txt").is_err());
 		assert!(validate_entry_extension("main.py").is_err());
 		assert!(validate_entry_extension("main.html").is_err());
-		assert!(validate_entry_extension("main").is_err()); // нет расширения
+		assert!(validate_entry_extension("main").is_err());
 	}
 
 	#[test]

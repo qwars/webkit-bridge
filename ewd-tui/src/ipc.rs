@@ -120,7 +120,6 @@ impl IpcClient {
 					Err(e) => warn!("Failed to parse response: {} (line: {})", e, line),
 				}
 			} else if let Some(method) = raw.get("method").and_then(|m| m.as_str()) {
-				// Пересылаем уведомления в основной поток
 				if method == "network_event" || method == "tabs_changed" {
 					let _ = notification_tx.send(raw);
 				}

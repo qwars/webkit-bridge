@@ -146,9 +146,10 @@ fn send_request(method: &str, params: Option<serde_json::Value>) -> Result<(), B
 			continue;
 		}
 		if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(&response_str)
-			&& resp.id == Some(1) {
-				break resp;
-			}
+			&& resp.id == Some(1)
+		{
+			break resp;
+		}
 	};
 
 	if let Some(error) = response.error {

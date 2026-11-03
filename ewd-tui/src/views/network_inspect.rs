@@ -91,13 +91,20 @@ impl NetworkInspectView {
 
 impl View for NetworkInspectView {
 	fn draw(&self, f: &mut Frame, state: &AppState) {
+		log::debug!("NetworkInspectView::draw called, event_idx: {}", self.event_idx);
+		log::debug!("buffer.lines.len(): {}", self.buffer.lines.len());
+
 		let area = f.area();
-
 		let event = match state.network_events.get(self.event_idx) {
-			Some(e) => e,
-			None => return,
+			Some(e) => {
+				log::debug!("Event found in draw: {} {}", e.method, e.url);
+				e
+			}
+			None => {
+				log::error!("Event not found in draw for event_idx: {}", self.event_idx);
+				return;
+			}
 		};
-
 		let title = Line::from(vec![Span::styled(
 			format!(" Inspect: {} {} ", event.method, truncate_url(&event.url, 60)),
 			Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
@@ -146,10 +153,7 @@ impl View for NetworkInspectView {
 
 	async fn handle_action(&mut self, action: Action, _state: &mut AppState) -> Result<bool> {
 		match action {
-			Action::CloseNetworkInspect => {
-				// Возврат обрабатывается в ui.rs через previous_screen
-				Ok(true)
-			}
+			Action::CloseNetworkInspect => Ok(true),
 			Action::BufferMoveUp => {
 				self.buffer.move_up();
 				Ok(true)

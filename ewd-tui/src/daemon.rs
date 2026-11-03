@@ -9,14 +9,12 @@ use tokio::time::{timeout, Duration};
 
 use crate::deps;
 
-/// Менеджер daemon subprocess
 pub struct DaemonManager {
 	child: Option<Child>,
 	socket_path: PathBuf,
 }
 
 impl DaemonManager {
-	/// Создать и запустить daemon
 	pub async fn start(log_tx: mpsc::UnboundedSender<String>) -> Result<Self> {
 		let daemon_path = deps::find_ewd_daemon()?;
 		let socket_path = Self::generate_socket_path();
@@ -24,7 +22,6 @@ impl DaemonManager {
 		info!("Starting daemon: {:?}", daemon_path);
 		info!("Socket path: {:?}", socket_path);
 
-		// !!! ДОБАВЛЕНО: Тестовое сообщение для проверки канала логов !!!
 		let _ = log_tx.send("ewd-tui: daemon started".to_string());
 
 		let mut child = Command::new(&daemon_path)
@@ -35,7 +32,6 @@ impl DaemonManager {
 			.spawn()
 			.context("Failed to spawn ewd-daemon")?;
 
-		// Перехватить stderr в отдельную задачу
 		if let Some(stderr) = child.stderr.take() {
 			let log_tx_clone = log_tx.clone();
 			tokio::spawn(async move {
@@ -47,7 +43,6 @@ impl DaemonManager {
 			});
 		}
 
-		// Дождаться готовности (проверить socket existence)
 		Self::wait_for_socket(&socket_path).await?;
 
 		info!("Daemon started successfully");
@@ -58,18 +53,15 @@ impl DaemonManager {
 		})
 	}
 
-	/// Сгенерировать уникальный путь сокета
 	fn generate_socket_path() -> PathBuf {
-		let runtime_dir = std::env::var("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|_| {
-			// Fallback для систем без XDG_RUNTIME_DIR
-			PathBuf::from("/tmp")
-		});
+		let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+			.map(PathBuf::from)
+			.unwrap_or_else(|_| PathBuf::from("/tmp"));
 
 		let pid = std::process::id();
 		runtime_dir.join(format!("ewd-tui-{}.sock", pid))
 	}
 
-	/// Дождаться появления socket файла
 	async fn wait_for_socket(socket_path: &PathBuf) -> Result<()> {
 		let timeout_duration = Duration::from_secs(5);
 
@@ -88,22 +80,18 @@ impl DaemonManager {
 		Ok(())
 	}
 
-	/// Получить путь сокета
 	pub fn socket_path(&self) -> &PathBuf {
 		&self.socket_path
 	}
 
-	/// Остановить daemon
 	pub async fn stop(&mut self) -> Result<()> {
 		if let Some(mut child) = self.child.take() {
 			info!("Stopping daemon");
 
-			// Послать SIGTERM
 			if let Err(e) = child.kill().await {
 				error!("Failed to kill daemon: {}", e);
 			}
 
-			// Дождаться завершения с timeout
 			let wait_result = timeout(Duration::from_secs(3), child.wait()).await;
 
 			match wait_result {
@@ -120,7 +108,6 @@ impl DaemonManager {
 			}
 		}
 
-		// Удалить socket файл
 		if self.socket_path.exists() {
 			if let Err(e) = std::fs::remove_file(&self.socket_path) {
 				error!("Failed to remove socket file: {}", e);
@@ -133,7 +120,6 @@ impl DaemonManager {
 
 impl Drop for DaemonManager {
 	fn drop(&mut self) {
-		// Синхронная очистка при drop (на случай если stop не был вызван)
 		if self.socket_path.exists() {
 			let _ = std::fs::remove_file(&self.socket_path);
 		}
