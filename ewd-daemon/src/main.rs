@@ -1,10 +1,9 @@
 use anyhow::Result;
 use ewd_core::events::DaemonEvent;
 use ewd_core::manager::{ManagerCommand, ManagerError, WebViewManager};
-use ewd_core::tab::Tab;
 use ewd_daemon::ipc::IpcServer;
 use gtk4::glib::prelude::*;
-use gtk4::prelude::GtkWindowExt;
+use gtk4::prelude::*;
 use nix::sys::signal;
 use nix::unistd::Pid;
 use std::env;
@@ -30,6 +29,7 @@ fn main() -> Result<()> {
 	info!("Starting EWD daemon");
 
 	let args: Vec<String> = std::env::args().collect();
+
 	let proxy_uri = args
 		.iter()
 		.position(|arg| arg == "--proxy")
@@ -44,8 +44,10 @@ fn main() -> Result<()> {
 
 	let (manager, mut gtk_rx) = WebViewManager::new(proxy_uri);
 	let manager = Arc::new(manager);
+
 	let main_loop = gtk4::glib::MainLoop::new(None, false);
 	let main_loop_clone = main_loop.clone();
+
 	let manager_tokio = Arc::clone(&manager);
 	let manager_ipc = Arc::clone(&manager);
 
@@ -54,6 +56,7 @@ fn main() -> Result<()> {
 			.map(|dir| format!("{dir}/webkit-bridge.sock"))
 			.expect("XDG_RUNTIME_DIR is not set. Please set it or use EWD_SOCKET_PATH.")
 	});
+
 	let socket_path_clone = socket_path.clone();
 
 	std::thread::spawn(move || {
@@ -86,7 +89,9 @@ fn main() -> Result<()> {
 
 			let mut shutdown_rx = manager_tokio.subscribe();
 			tokio::select! {
-				_ = tokio::signal::ctrl_c() => { info!("Ctrl+C received in Tokio thread"); }
+				_ = tokio::signal::ctrl_c() => {
+					info!("Ctrl+C received in Tokio thread");
+				}
 				_ = async {
 					while let Ok(event) = shutdown_rx.recv().await {
 						if matches!(event, DaemonEvent::Shutdown) {
@@ -100,17 +105,24 @@ fn main() -> Result<()> {
 
 			info!("Shutting down EWD daemon (Tokio cleanup)");
 			server_handle.abort();
+
 			if Path::new(&socket_path_clone).exists() {
 				let _ = std::fs::remove_file(&socket_path_clone);
 				info!("Removed socket file {}", socket_path_clone);
 			}
+
 			main_loop_clone.quit();
 		});
 	});
 
 	let main_loop_for_shutdown = main_loop.clone();
+
 	gtk4::glib::MainContext::default().spawn_local(async move {
-		let tabs = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::<Uuid, Tab>::new()));
+		let tabs = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::<
+			Uuid,
+			ewd_core::tab::Tab,
+		>::new()));
+
 		let mut event_rx = manager.subscribe();
 
 		gtk4::glib::MainContext::default().spawn_local(async move {
@@ -134,14 +146,29 @@ fn main() -> Result<()> {
 					tx,
 				} => {
 					let id = Uuid::new_v4();
-					let tab = Tab::new(id, &url, visible, manager.proxy_uri(), client_id, owner_pid);
 
+					// 1. Создаём таб (без загрузки URL)
+					let tab = ewd_core::tab::Tab::new(id, &url, visible, manager.proxy_uri(), client_id, owner_pid);
+
+					// 2. Network monitoring
 					let event_tx_monitor = manager.event_tx();
 					let tab_id = id;
 					tab.setup_network_monitoring(move |event| {
 						let _ = event_tx_monitor.send(DaemonEvent::NetworkEvent { id: tab_id, event });
 					});
 
+					// 3. JS Bridge (ДО загрузки страницы!)
+					let event_tx_js = manager.event_tx();
+					let tab_id_js = id;
+					tab.setup_js_bridge(move |message_type, data| {
+						let _ = event_tx_js.send(DaemonEvent::JsMessage {
+							id: tab_id_js,
+							message_type,
+							data,
+						});
+					});
+
+					// 4. Window close handler
 					if let Some(ref win) = tab.window {
 						let id_clone = id;
 						let tabs_clone = std::rc::Rc::clone(&tabs);
@@ -153,6 +180,7 @@ fn main() -> Result<()> {
 						});
 					}
 
+					// 5. Title change handler
 					let event_tx = manager.event_tx();
 					let webview = tab.webview.clone();
 					webview.connect_notify_local(Some("title"), move |wv, _| {
@@ -164,6 +192,7 @@ fn main() -> Result<()> {
 						}
 					});
 
+					// 6. URI change handler
 					let event_tx_uri = manager.event_tx();
 					let webview_uri = webview.clone();
 					webview_uri.connect_notify_local(Some("uri"), move |wv, _| {
@@ -175,9 +204,13 @@ fn main() -> Result<()> {
 						}
 					});
 
+					// 7. Загружаем URL (ПОСЛЕ setup_js_bridge)
+					tab.start_loading();
+
 					tabs.borrow_mut().insert(id, tab);
 					let _ = tx.send(id);
 				}
+
 				ManagerCommand::Close { id, client_id, tx } => {
 					let tab_to_close = tabs.borrow_mut().remove(&id);
 					let res = match tab_to_close {
@@ -185,13 +218,12 @@ fn main() -> Result<()> {
 							if tab.owner_client_id != client_id {
 								tabs.borrow_mut().insert(id, tab);
 								Err(ManagerError::NotOwner(id))
+							} else if let Some(win) = tab.window {
+								win.close();
+								Ok(())
 							} else {
-								if let Some(win) = tab.window {
-									win.close();
-								} else {
-									let _ = manager.event_tx().send(DaemonEvent::TabClosed { id });
-									info!("Headless tab {} closed", id);
-								}
+								let _ = manager.event_tx().send(DaemonEvent::TabClosed { id });
+								info!("Headless tab {} closed", id);
 								Ok(())
 							}
 						}
@@ -199,6 +231,7 @@ fn main() -> Result<()> {
 					};
 					let _ = tx.send(res);
 				}
+
 				ManagerCommand::Navigate { id, url, client_id, tx } => {
 					let res = match tabs.borrow_mut().get_mut(&id) {
 						Some(tab) => {
@@ -213,6 +246,7 @@ fn main() -> Result<()> {
 					};
 					let _ = tx.send(res);
 				}
+
 				ManagerCommand::Reload { id, client_id, tx } => {
 					let res = match tabs.borrow().get(&id) {
 						Some(tab) => {
@@ -227,6 +261,7 @@ fn main() -> Result<()> {
 					};
 					let _ = tx.send(res);
 				}
+
 				ManagerCommand::List { tx } => {
 					let list = tabs
 						.borrow()
@@ -243,6 +278,7 @@ fn main() -> Result<()> {
 						.collect();
 					let _ = tx.send(list);
 				}
+
 				ManagerCommand::Eval {
 					id,
 					script,
@@ -256,6 +292,7 @@ fn main() -> Result<()> {
 							None
 						}
 					});
+
 					match webview_opt {
 						Some(webview) => {
 							let eval_res = match webview.evaluate_javascript_future(&script, None, None).await {
@@ -280,6 +317,7 @@ fn main() -> Result<()> {
 						}
 					}
 				}
+
 				ManagerCommand::SetVisible {
 					id,
 					visible,
@@ -304,6 +342,7 @@ fn main() -> Result<()> {
 							}
 						}
 					};
+
 					if res.is_ok() && visible && !was_visible_before {
 						let id_clone = id;
 						let tabs_clone = std::rc::Rc::clone(&tabs);
@@ -318,13 +357,16 @@ fn main() -> Result<()> {
 							});
 						}
 					}
+
 					if res.is_ok() {
 						let _ = manager
 							.event_tx()
 							.send(DaemonEvent::TabVisibilityChanged { id, visible });
 					}
+
 					let _ = tx.send(res);
 				}
+
 				ManagerCommand::CleanupOrphans => {
 					let to_close: Vec<(Uuid, Option<gtk4::Window>)> = tabs
 						.borrow()
@@ -338,6 +380,7 @@ fn main() -> Result<()> {
 						})
 						.map(|(id, tab)| (*id, tab.window.clone()))
 						.collect();
+
 					for (id, win_opt) in to_close {
 						if let Some(win) = win_opt {
 							info!("Orphan tab {} closed (owner process is dead)", id);

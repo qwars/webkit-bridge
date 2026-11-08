@@ -544,6 +544,7 @@ dependencies = [
  "gdk4",
  "glib",
  "gtk4",
+ "javascriptcore6",
  "parking_lot 0.13.0",
  "serde",
  "serde_json",

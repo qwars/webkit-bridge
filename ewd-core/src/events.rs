@@ -24,13 +24,39 @@ pub enum NetworkEventType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DaemonEvent {
-	TabCreated { id: Uuid, url: String },
-	TabClosed { id: Uuid },
-	TabNavigated { id: Uuid, url: String },
-	TabReloaded { id: Uuid },
-	TabTitleChanged { id: Uuid, title: String },
-	TabVisibilityChanged { id: Uuid, visible: bool },
-	NetworkEvent { id: Uuid, event: NetworkEvent },
+	TabCreated {
+		id: Uuid,
+		url: String,
+	},
+	TabClosed {
+		id: Uuid,
+	},
+	TabNavigated {
+		id: Uuid,
+		url: String,
+	},
+	TabReloaded {
+		id: Uuid,
+	},
+	TabTitleChanged {
+		id: Uuid,
+		title: String,
+	},
+	TabVisibilityChanged {
+		id: Uuid,
+		visible: bool,
+	},
+	NetworkEvent {
+		id: Uuid,
+		event: NetworkEvent,
+	},
+	/// Arbitrary message sent from JavaScript in a tab via `window.ewd.send(type, data)`.
+	/// Broadcast to all connected IPC clients as a JSON-RPC notification.
+	JsMessage {
+		id: Uuid,
+		message_type: String,
+		data: serde_json::Value,
+	},
 	Shutdown,
 }
 
@@ -74,6 +100,19 @@ mod tests {
 	}
 
 	#[test]
+	fn test_js_message_serializes_to_snake_case() {
+		let event = DaemonEvent::JsMessage {
+			id: test_uuid(),
+			message_type: "translation_done".to_string(),
+			data: serde_json::json!({"text": "hello"}),
+		};
+		let json = serde_json::to_string(&event).unwrap();
+		assert!(json.contains("\"js_message\""));
+		assert!(json.contains("\"translation_done\""));
+		assert!(json.contains("\"hello\""));
+	}
+
+	#[test]
 	fn test_roundtrip_all_variants() {
 		let events = vec![
 			DaemonEvent::TabCreated {
@@ -106,6 +145,11 @@ mod tests {
 					request_headers: vec![],
 					response_headers: vec![],
 				},
+			},
+			DaemonEvent::JsMessage {
+				id: test_uuid(),
+				message_type: "translation_done".to_string(),
+				data: serde_json::json!({"text": "hello"}),
 			},
 			DaemonEvent::Shutdown,
 		];

@@ -1,12 +1,15 @@
 use crate::events::{NetworkEvent, NetworkEventType};
 use crate::manager::ManagerError;
 use gtk4::prelude::*;
+use javascriptcore6::Value as JsValue;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use uuid::Uuid;
 use webkit6::prelude::*;
-use webkit6::{NetworkProxyMode, NetworkProxySettings, WebView};
+use webkit6::{
+	NetworkProxyMode, NetworkProxySettings, UserContentInjectedFrames, UserScript, UserScriptInjectionTime, WebView,
+};
 
 pub struct Tab {
 	pub id: Uuid,
@@ -36,7 +39,8 @@ impl Tab {
 			session.set_proxy_settings(NetworkProxyMode::Custom, Some(&proxy_settings));
 		}
 
-		webview.load_uri(url);
+		// НЕ вызываем load_uri здесь — это делается в start_loading()
+		// после setup_js_bridge()
 
 		let window = if visible {
 			let win = gtk4::Window::new();
@@ -58,6 +62,11 @@ impl Tab {
 			owner_client_id,
 			owner_pid,
 		}
+	}
+
+	/// Загружает URL в WebView. Должен вызываться ПОСЛЕ setup_js_bridge().
+	pub fn start_loading(&self) {
+		self.webview.load_uri(&self.url);
 	}
 
 	pub fn navigate(&mut self, url: &str) {
@@ -91,7 +100,6 @@ impl Tab {
 		Ok(())
 	}
 
-	/// Подключает мониторинг сетевых запросов для этого таба.
 	pub fn setup_network_monitoring<F>(&self, callback: F)
 	where
 		F: Fn(NetworkEvent) + Send + Sync + 'static,
@@ -110,7 +118,6 @@ impl Tab {
 					.map(|m| m.to_string())
 					.unwrap_or_else(|| "GET".to_string());
 
-				// Извлекаем заголовки запроса
 				let mut req_headers = Vec::new();
 				if let Some(headers) = request.http_headers() {
 					headers.foreach(|name, value| {
@@ -154,7 +161,6 @@ impl Tab {
 
 					let status_code = res.response().map(|r| r.status_code());
 
-					// Извлекаем размер ответа
 					let response_size_bytes = res.response().and_then(|r| {
 						let len = r.content_length();
 						if len > 0 { Some(len) } else { None }
@@ -200,7 +206,7 @@ impl Tab {
 						url: uri_failed.clone(),
 						method: method_failed.clone(),
 						status_code: None,
-						response_time_ms,
+						response_time_ms, // ← используем вычисленную переменную
 						response_size_bytes: None,
 						event_type: NetworkEventType::Failed,
 						request_headers: (*req_headers_failed).clone(),
@@ -208,5 +214,90 @@ impl Tab {
 					});
 				});
 			});
+	}
+
+	pub fn setup_js_bridge<F>(&self, callback: F)
+	where
+		F: Fn(String, serde_json::Value) + Send + Sync + 'static,
+	{
+		let Some(manager) = self.webview.user_content_manager() else {
+			tracing::warn!(
+				"Failed to get UserContentManager for tab {}, JS bridge not installed",
+				self.id
+			);
+			return;
+		};
+
+		// 1. Регистрируем handler "ewd" для приёма сообщений из JS
+		if !manager.register_script_message_handler("ewd", None) {
+			tracing::error!("Failed to register script message handler 'ewd' for tab {}", self.id);
+			return;
+		}
+
+		// 2. Подключаемся к событию получения сообщения
+		let callback = Arc::new(Mutex::new(callback));
+		let callback_clone = Arc::clone(&callback);
+		let tab_id = self.id;
+
+		manager.connect_script_message_received(Some("ewd"), move |_, message: &JsValue| {
+			let raw = message.to_str().to_string();
+			tracing::debug!("Received JS message in tab {}: {}", tab_id, raw);
+
+			match serde_json::from_str::<serde_json::Value>(&raw) {
+				Ok(parsed) => {
+					let message_type = parsed
+						.get("type")
+						.and_then(|v| v.as_str())
+						.unwrap_or("unknown")
+						.to_string();
+					let data = parsed.get("data").cloned().unwrap_or(serde_json::Value::Null);
+
+					let cb = callback_clone.lock().unwrap();
+					cb(message_type, data);
+				}
+				Err(e) => {
+					tracing::warn!(
+						"Failed to parse JS message as JSON in tab {}: {} (raw: {})",
+						tab_id,
+						e,
+						raw
+					);
+				}
+			}
+		});
+
+		// 3. Инжектируем JS-мост во все фреймы в момент начала загрузки страницы
+		let js_bridge = r#"
+            (function() {
+                // Создаём window.ewd если его нет, или используем существующий
+                window.ewd = window.ewd || {};
+                // Всегда инжектим метод send, даже если window.ewd уже существовал
+                window.ewd.send = function(type, data) {
+                    try {
+                        if (window.webkit &&
+                            window.webkit.messageHandlers &&
+                            window.webkit.messageHandlers.ewd) {
+                            window.webkit.messageHandlers.ewd.postMessage(
+                                JSON.stringify({ type: type, data: data })
+                            );
+                        } else {
+                            console.error('[ewd] message handler unavailable');
+                        }
+                    } catch (e) {
+                        console.error('[ewd] send error', e);
+                    }
+                };
+            })();
+        "#;
+
+		manager.add_script(&UserScript::new(
+			js_bridge,
+			UserContentInjectedFrames::AllFrames,
+			UserScriptInjectionTime::Start,
+			&[],
+			&[],
+		));
+
+		tracing::info!("JS bridge installed for tab {}", self.id);
 	}
 }

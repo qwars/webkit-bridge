@@ -126,6 +126,10 @@ impl IpcServer {
 								"network_event",
 								serde_json::json!({"id": id.to_string(), "event": event}),
 							),
+							DaemonEvent::JsMessage { id, message_type, data } => (
+								"js_message",
+								serde_json::json!({"id": id, "message_type": message_type, "data": data}),
+							),
 							DaemonEvent::Shutdown => ("shutdown", serde_json::json!({})),
 						};
 
