@@ -282,7 +282,8 @@ DATA is the message payload."
            :coding 'utf-8-emacs-unix))
     (set-process-query-on-exit-flag ewd--process nil)
     (message "Connected to ewd-daemon at %s (client %s)" socket-path ewd--client-id)
-    (ewd-dashboard)))
+    ;; (ewd-dashboard)
+  ))
 
 ;;;###autoload
 (defun ewd-disconnect ()
