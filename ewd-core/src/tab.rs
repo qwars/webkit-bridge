@@ -243,15 +243,8 @@ impl Tab {
 			let raw = message.to_str().to_string();
 			tracing::debug!("Received JS message in tab {}: {}", tab_id, raw);
 
-			match serde_json::from_str::<serde_json::Value>(&raw) {
-				Ok(parsed) => {
-					let message_type = parsed
-						.get("type")
-						.and_then(|v| v.as_str())
-						.unwrap_or("unknown")
-						.to_string();
-					let data = parsed.get("data").cloned().unwrap_or(serde_json::Value::Null);
-
+			match parse_js_message(&raw) {
+				Ok((message_type, data)) => {
 					let cb = callback_clone.lock().unwrap();
 					cb(message_type, data);
 				}
@@ -271,6 +264,7 @@ impl Tab {
             (function() {
                 // Создаём window.ewd если его нет, или используем существующий
                 window.ewd = window.ewd || {};
+
                 // Всегда инжектим метод send, даже если window.ewd уже существовал
                 window.ewd.send = function(type, data) {
                     try {
@@ -287,6 +281,49 @@ impl Tab {
                         console.error('[ewd] send error', e);
                     }
                 };
+
+                // Перехватчики console.* для отладки
+                const orig = {
+                    log: console.log,
+                    warn: console.warn,
+                    error: console.error,
+                    dir: console.dir
+                };
+
+                const send = (level, args) => {
+                    try {
+                        const data = Array.from(args).map(a => {
+                            try {
+                                return typeof a === 'object' ? JSON.stringify(a) : String(a);
+                            } catch {
+                                return String(a);
+                            }
+                        }).join(' ');
+                        window.ewd.send('console_' + level, { text: data });
+                    } catch (e) {
+                        // Игнорируем ошибки в перехватчике, чтобы не ломать страницу
+                    }
+                };
+
+                console.log = function() {
+                    orig.log.apply(console, arguments);
+                    send('log', arguments);
+                };
+
+                console.warn = function() {
+                    orig.warn.apply(console, arguments);
+                    send('warn', arguments);
+                };
+
+                console.error = function() {
+                    orig.error.apply(console, arguments);
+                    send('error', arguments);
+                };
+
+                console.dir = function() {
+                    orig.dir.apply(console, arguments);
+                    send('dir', arguments);
+                };
             })();
         "#;
 
@@ -300,4 +337,19 @@ impl Tab {
 
 		tracing::info!("JS bridge installed for tab {}", self.id);
 	}
+}
+
+/// Парсит JSON-сообщение из JS в кортеж (message_type, data)
+pub fn parse_js_message(raw: &str) -> Result<(String, serde_json::Value), String> {
+	let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("JSON parse error: {}", e))?;
+
+	let message_type = parsed
+		.get("type")
+		.and_then(|v| v.as_str())
+		.unwrap_or("unknown")
+		.to_string();
+
+	let data = parsed.get("data").cloned().unwrap_or(serde_json::Value::Null);
+
+	Ok((message_type, data))
 }
