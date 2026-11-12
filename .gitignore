@@ -9,3 +9,7 @@
 
 *.log
 bash/*.log
+**/*.el.txt
+*.el.txt
+**/*.elc
+*.elc

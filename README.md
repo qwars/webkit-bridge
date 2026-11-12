@@ -4,7 +4,7 @@ A high-performance, lightweight WebKitGTK daemon for headless and visible browse
 
 ## Overview
 
-`webkit-bridge` is a Rust-based project providing a daemon (`ewd-daemon`) and CLI utility (`wkctl`) for managing WebKitGTK browser instances through a clean JSON-RPC API. Designed for integration with scripts, automation tools, and any JSON-RPC 2.0 compatible client.
+`webkit-bridge` is a Rust workspace providing a daemon (`ewd-daemon`), CLI utility (`wkctl`), terminal UI (`ewd-tui`), and Emacs client (`ewd.el`) for managing WebKitGTK browser instances through a clean JSON-RPC API. Designed for integration with scripts, automation tools, and any JSON-RPC 2.0 compatible client.
 
 ## Key Features
 
@@ -15,6 +15,8 @@ A high-performance, lightweight WebKitGTK daemon for headless and visible browse
 - Push notifications via `tabs_changed` JSON-RPC notifications
 - Zero-copy Unix socket IPC for maximum performance
 - Graceful shutdown via IPC command
+- **Terminal UI** (`ewd-tui`) — project management, auto-build with esbuild, network inspector, console
+- **Emacs integration** — full-featured client with tab management, JavaScript evaluation, dashboard
 
 ## Architecture
 
@@ -22,16 +24,26 @@ A high-performance, lightweight WebKitGTK daemon for headless and visible browse
 webkit-bridge/
 ├── ewd-core/          # Library crate (reusable API)
 ├── ewd-daemon/        # Binary crate (standalone daemon)
-├── wkctl/             # CLI utility for testing
+├── wkctl/             # CLI utility for testing and scripting
+├── ewd-tui/           # Terminal UI (ratatui) — project management, network inspector
 ├── emacs/             # Emacs client (ewd.el)
-└── bash/              # Integration tests
+├── elisp-packages/    # Emacs Lisp packages:
+│   ├── ewd/           #   Main EWD client
+│   ├── ewd-deepseek/  #   DeepSeek AI integration
+│   └── ewd-translate/ #   Translation plugin
+├── bash/              # Integration tests
+├── docs/              # Documentation (protocol, events)
+└── release-pkg/       # Release packaging scripts
 ```
 
 - `ewd-core`: Shared library with `WebViewManager`, `Tab`, `Profile`, and event system
 - `ewd-daemon`: Standalone daemon with GTK main loop + Tokio async runtime
 - `wkctl`: CLI client for testing and scripting
+- `ewd-tui`: Terminal UI for project management, auto-build with esbuild, network inspector
 - `emacs/`: Emacs Lisp client for seamless integration
+- `elisp-packages/`: Additional Emacs Lisp packages (DeepSeek AI, translation)
 - `bash/`: Integration test suite
+- `docs/`: Protocol specification and event reference
 
 ## System Requirements
 
@@ -40,6 +52,7 @@ webkit-bridge/
 - OS: Linux (tested on Debian 13, should work on any modern Linux distribution)
 - Display: Wayland or X11
 - GPU: Any GPU with proper drivers (tested on AMDGPU, Intel, NVIDIA)
+- Terminal: 256-color support (true color recommended for `ewd-tui`)
 
 ### Required Dependencies
 
@@ -53,6 +66,12 @@ sudo apt install \
   libjavascriptcoregtk-6.0-dev \
   pkg-config \
   build-essential
+```
+
+For `ewd-tui`:
+
+```bash
+sudo apt install esbuild   # or: npm install -g esbuild
 ```
 
 Rust toolchain:
@@ -75,12 +94,27 @@ cargo build --release
 Binaries will be in `target/release/`:
 - `ewd-daemon` — The main daemon
 - `wkctl` — CLI client utility
+- `ewd-tui` — Terminal UI
 
 ### Install System-wide (Optional)
 
 ```bash
 sudo cp target/release/ewd-daemon /usr/local/bin/
 sudo cp target/release/wkctl /usr/local/bin/
+sudo cp target/release/ewd-tui /usr/local/bin/
+```
+
+### Build Individual Components
+
+```bash
+# Daemon only
+cargo build --release -p ewd-daemon
+
+# CLI client only
+cargo build --release -p wkctl
+
+# Terminal UI only
+cargo build --release -p ewd-tui
 ```
 
 ## Running the Daemon
@@ -145,6 +179,7 @@ journalctl --user -u ewd-daemon -f
 | `WEBKIT_DISABLE_COMPOSITING_MODE` | Recommended for Wayland/AMDGPU stability                              |
 | `WEBKIT_DISABLE_DMABUF_RENDERER`  | Recommended for Wayland/AMDGPU stability                              |
 | `GDK_BACKEND`                     | Recommended: `wayland`                                                |
+| `EWD_DAEMON_PATH`                 | Custom path to `ewd-daemon` binary (used by `ewd-tui`)                |
 
 Default socket path priority:
 1. `EWD_SOCKET_PATH` (if set)
@@ -167,7 +202,7 @@ Each connection receives a unique `client_id` (UUID). Clients can override this 
 
 Create a new browser tab.
 
-Request:
+**Request:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -181,7 +216,7 @@ Request:
 }
 ```
 
-Response:
+**Response:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -201,7 +236,7 @@ Parameters:
 
 Close an existing tab. Only the owner client can close its tabs.
 
-Request:
+**Request:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -214,7 +249,7 @@ Request:
 }
 ```
 
-Response (success):
+**Response (success):**
 ```json
 {
   "jsonrpc": "2.0",
@@ -223,7 +258,7 @@ Response (success):
 }
 ```
 
-Response (error — not owner):
+**Response (error — not owner):**
 ```json
 {
   "jsonrpc": "2.0",
@@ -239,7 +274,7 @@ Response (error — not owner):
 
 Navigate a tab to a new URL. Only the owner client can navigate its tabs.
 
-Request:
+**Request:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -253,7 +288,7 @@ Request:
 }
 ```
 
-Response:
+**Response:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -266,7 +301,7 @@ Response:
 
 Reload a tab. Only the owner client can reload its tabs.
 
-Request:
+**Request:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -279,7 +314,7 @@ Request:
 }
 ```
 
-Response:
+**Response:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -292,7 +327,7 @@ Response:
 
 Execute JavaScript in a tab context. Only the owner client can evaluate JS in its tabs.
 
-Request:
+**Request:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -306,7 +341,7 @@ Request:
 }
 ```
 
-Response:
+**Response:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -321,7 +356,7 @@ Response:
 
 List all open tabs. Available to all clients (no ownership check).
 
-Request:
+**Request:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -333,7 +368,7 @@ Request:
 }
 ```
 
-Response:
+**Response:**
 ```json
 {
    "jsonrpc": "2.0",
@@ -368,7 +403,7 @@ Fields:
 
 Show a tab in a GTK window. If the tab is already visible, brings the window to focus. Only the owner client can show its tabs.
 
-Request:
+**Request:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -381,7 +416,7 @@ Request:
 }
 ```
 
-Response:
+**Response:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -396,7 +431,7 @@ Use case: Solve CAPTCHAs manually or interact with pages that require user input
 
 Hide a tab (convert to headless). The GTK window is closed, but the tab and its WebView remain alive. Only the owner client can hide its tabs.
 
-Request:
+**Request:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -409,7 +444,7 @@ Request:
 }
 ```
 
-Response:
+**Response:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -424,7 +459,7 @@ Use case: After solving a CAPTCHA, hide the window to return to headless mode.
 
 Shutdown the daemon gracefully.
 
-Request:
+**Request:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -436,7 +471,7 @@ Request:
 }
 ```
 
-Response:
+**Response:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -506,6 +541,58 @@ wkctl shutdown
 
 **Note:** `wkctl` uses a fixed `client_id` (`00000000-0000-0000-0000-000000000000`), so all `wkctl` invocations share ownership of tabs created via CLI.
 
+## ewd-tui — Terminal UI
+
+[`ewd-tui`](ewd-tui/README.md) is a full-featured terminal interface for managing web development projects with `ewd-daemon`. Built with `ratatui`, it provides:
+
+- **Project management** — create, delete, and navigate projects via a list view
+- **Auto-build** — watches source files and rebuilds with `esbuild` on change
+- **Browser integration** — automatically starts `ewd-daemon`, creates a visible tab, and loads the project URL
+- **Network inspector** — view network requests with timing, status codes, headers, and filtering
+- **Console & logs** — real-time output from the build process and daemon logs
+- **Multiple keymaps** — Emacs, Vim, and VSCode keybindings (toggle with `Ctrl+K`)
+- **Search** — fuzzy search across projects and network events
+
+```bash
+# Start the terminal UI
+ewd-tui
+
+# Or from the workspace
+cargo run --release -p ewd-tui
+```
+
+See [ewd-tui/README.md](ewd-tui/README.md) for full documentation.
+
+## Emacs Integration
+
+[`ewd.el`](emacs/README.md) is an Emacs Lisp client that connects to the daemon via Unix socket, providing:
+
+- Tab management from within Emacs (`*ewd-tabs*` buffer)
+- JavaScript evaluation for web scraping and automation
+- Show/hide tabs interactively (CAPTCHA solving)
+- Push-based updates via `tabs_changed` notifications
+- Owner-based access control
+
+**Global keybindings** (`C-c w` prefix):
+
+| Keybinding | Command             | Description                               |
+|------------|---------------------|-------------------------------------------|
+| `C-c w c`  | `ewd-connect`       | Connect to the daemon                     |
+| `C-c w t`  | `ewd-create-tab`    | Create a new tab                          |
+| `C-c w l`  | `ewd-list-tabs`     | Show `*ewd-tabs*` buffer                  |
+| `C-c w k`  | `ewd-close-tab`     | Close a tab by ID                         |
+| `C-c w e`  | `ewd-eval`          | Evaluate JavaScript in a tab              |
+| `C-c w n`  | `ewd-navigate`      | Navigate a tab to a new URL               |
+| `C-c w r`  | `ewd-reload`        | Reload a tab                              |
+| `C-c w S`  | `ewd-show-tab`      | Show tab in GTK window                    |
+| `C-c w H`  | `ewd-hide-tab`      | Hide tab (convert to headless)            |
+
+Additional Emacs Lisp packages are available in [`elisp-packages/`](elisp-packages/):
+- [`ewd-deepseek`](elisp-packages/ewd-deepseek/) — DeepSeek AI integration
+- [`ewd-translate`](elisp-packages/ewd-translate/) — Translation plugin
+
+See [emacs/README.md](emacs/README.md) for full documentation.
+
 ## Testing
 
 ### Unit Tests
@@ -521,6 +608,22 @@ cargo test
 ```
 
 See [bash/README.md](bash/README.md) for details.
+
+### Test Suites
+
+| Suite         | Description                                      |
+|---------------|--------------------------------------------------|
+| `basic`       | Tab lifecycle (create, list, close)              |
+| `eval`        | JavaScript evaluation                            |
+| `errors`      | Error handling (non-existent tab, invalid UUID)  |
+| `concurrent`  | 10 concurrent tabs create/close                  |
+| `orphan`      | Orphan cleanup (~65s, requires 60s interval)     |
+| `shutdown`    | Graceful daemon shutdown                         |
+
+## Documentation
+
+- [Protocol Specification](docs/PROTOCOL.md) — JSON-RPC protocol details
+- [Events Reference](docs/EVENTS.md) — Event system documentation
 
 ## Troubleshooting
 
@@ -552,8 +655,24 @@ Or the daemon will automatically clean it up on startup.
 
 Tabs are owned by the client process (identified by PID). If the process dies unexpectedly, the daemon's background cleanup task (runs every 60 seconds) will detect the dead PID and close orphaned tabs automatically.
 
+### ewd-tui: Daemon Not Found
+
+Ensure `ewd-daemon` is built and in PATH, or set `EWD_DAEMON_PATH`:
+
+```bash
+export EWD_DAEMON_PATH=/path/to/ewd-daemon
+ewd-tui
+```
+
 ## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
 
 ## Contributing
 
 Contributions are welcome! Please open an issue or submit a pull request.
+
+1. Fork the repository
+2. Create a feature branch
+3. Test your changes with `cargo test` and `./bash/integration.sh`
+4. Submit a pull request
